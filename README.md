@@ -14,29 +14,74 @@ This project converts the supplied Colab notebook into a local PySide6 desktop a
 
 The original validated analytical cells are retained in `app/core/legacy_program.py` and executed in a controlled compatibility namespace. The PySide6 UI and service wrapper replace only notebook/Colab concerns. This migration strategy minimizes numerical and decision-flow changes.
 
+The Makefile delegates cross-platform process and filesystem work to `scripts/project_tasks.py`. This avoids PowerShell activation scripts and execution-policy requirements. It does not change the desktop application or matching algorithm.
+
+No `.ps1` or `.bat` files are required or included. All development, testing, packaging, and installer operations are exposed through Make targets.
+
 ## Supported environment
 
 Use 64-bit Windows 10 or Windows 11 and Python 3.12 for the simplest build path. Python is required only on the development/build computer. The generated standalone application includes the Python runtime for end users.
 
-## Run from VS Code on Windows
+GNU Make must be installed and available as `make`. Some MinGW installations expose it as `mingw32-make`; when that is the case, replace `make` with `mingw32-make` in every command below.
 
-Open the extracted project folder in VS Code, then run these commands in PowerShell:
+## Setup and run from VS Code
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\setup.ps1
-.un.ps1
+Extract the project and open its root folder in VS Code. Run the following commands from the VS Code terminal:
+
+```text
+make setup
+make run
 ```
 
-Equivalent manual commands:
+`make setup` performs all of the following without activating the virtual environment:
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools wheel
-pip install -r requirements-dev.txt
-python main.py
+- Creates `.venv`.
+- Upgrades `pip`, `setuptools`, and `wheel`.
+- Installs runtime, test, and packaging dependencies.
+- Runs `pip check`.
+
+The default Windows Python launcher is `py`. To use Python 3.12 explicitly:
+
+```text
+make setup PYTHON="py -3.12"
 ```
+
+To use a `python` executable already available on `PATH`:
+
+```text
+make setup PYTHON=python
+```
+
+After setup, every target invokes `.venv` directly; no PowerShell activation or execution-policy change is required.
+
+## Complete Make commands
+
+```text
+make help
+make setup
+make run
+make test
+make verify
+make build
+make installer
+make installer-only
+make clean
+make distclean
+make rebuild
+```
+
+| Command | Purpose |
+|---|---|
+| `make setup` | Create `.venv` and install all required dependencies. |
+| `make run` | Start the PySide6 desktop application. |
+| `make test` | Run the automated tests. |
+| `make verify` | Run dependency, test, and Python compilation checks. |
+| `make build` | Test and create the standalone application folder. |
+| `make installer` | Build the application and create the Windows installer. |
+| `make installer-only` | Create the installer from an existing standalone build. |
+| `make clean` | Delete build output and Python cache directories. |
+| `make distclean` | Run `clean` and also delete `.venv`. |
+| `make rebuild` | Clean and rebuild the standalone application. |
 
 ## Application workflow
 
@@ -67,8 +112,10 @@ Do not delete the progress CSV until the review is complete if you want to resum
 
 ## Build the standalone Windows application
 
-```powershell
-.uild.ps1
+Run:
+
+```text
+make build
 ```
 
 The output is:
@@ -82,17 +129,47 @@ The build is intentionally **one-folder**, not one-file. GIS libraries, Qt plugi
 ## Build the Windows installer
 
 1. Install Inno Setup 6.
-2. Run `build.ps1` first.
-3. Open `installer\RoadMatcher.iss` in Inno Setup.
-4. Click **Compile**.
+2. Run:
 
-The installer will be written to:
+```text
+make installer
+```
+
+The command runs tests, builds the standalone application, locates `ISCC.exe`, and compiles `installer\RoadMatcher.iss`.
+
+If Inno Setup is installed in a nonstandard location, provide the compiler path:
+
+```text
+make installer ISCC_EXE="C:/Program Files (x86)/Inno Setup 6/ISCC.exe"
+```
+
+To compile the installer without rebuilding the application:
+
+```text
+make installer-only
+```
+
+The installer is written to:
 
 ```text
 installer_output\RoadMatcher-Setup-1.0.0.exe
 ```
 
 The installed application runs without a separate Python installation.
+
+## Cleaning generated files
+
+Remove build products and Python caches while preserving `.venv`, source code, selected GeoJSON files, and user output files:
+
+```text
+make clean
+```
+
+Also remove `.venv`:
+
+```text
+make distclean
+```
 
 ## Basemap behavior
 
@@ -102,8 +179,8 @@ The map always displays both candidate roads, nearby context roads, contact poin
 
 Run:
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest
+```text
+make verify
 ```
 
 The tests compile all retained notebook cells, validate configuration behavior, and run the analytical pipeline against generated synthetic GeoJSON files.
