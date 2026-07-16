@@ -1,27 +1,27 @@
-"""Makefile task implementation for Road Matcher Desktop.
+"""Conda-prefix-backed Make tasks for Road Matcher Desktop.
 
-The Makefile intentionally delegates filesystem and process work to Python so
-that the same targets work from Windows Command Prompt, PowerShell, Git Bash,
-and common Unix shells without shell-specific activation commands.
+The Conda installation's base Python may be older than the application Python.
+This bootstrap module therefore remains Python 3.9 compatible. ``make setup``
+creates a dedicated Conda environment at ``<project>/.venv`` with Python 3.12.
+All runtime, test, build, and installer operations execute inside that local
+prefix through ``conda run --prefix``; no activation and no ``py`` launcher are
+required.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+
+CommandPart = Union[str, os.PathLike]
 
 ROOT = Path(__file__).resolve().parents[1]
-VENV_DIR = ROOT / ".venv"
-VENV_PYTHON = (
-    VENV_DIR / "Scripts" / "python.exe"
-    if os.name == "nt"
-    else VENV_DIR / "bin" / "python"
-)
 SPEC_FILE = ROOT / "road_matcher.spec"
 INNO_SCRIPT = ROOT / "installer" / "RoadMatcher.iss"
 DIST_EXE = ROOT / "dist" / "RoadMatcher" / (
@@ -29,83 +29,350 @@ DIST_EXE = ROOT / "dist" / "RoadMatcher" / (
 )
 INSTALLER_OUTPUT = ROOT / "installer_output" / "RoadMatcher-Setup-1.0.0.exe"
 
+CONDA_PYTHON_VERSION = os.environ.get(
+    "ROAD_MATCHER_PYTHON_VERSION", "3.12"
+).strip()
 
-def _display_command(command: Sequence[str | os.PathLike[str]]) -> str:
-    return " ".join(f'"{part}"' if " " in str(part) else str(part) for part in command)
+
+def _configured_prefix() -> Path:
+    raw = os.environ.get("ROAD_MATCHER_CONDA_PREFIX", str(ROOT / ".venv"))
+    cleaned = raw.strip().strip('"')
+    path = Path(cleaned).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
+
+
+CONDA_PREFIX = _configured_prefix()
+CONDA_HISTORY = CONDA_PREFIX / "conda-meta" / "history"
+
+
+def _display_command(command: Sequence[CommandPart]) -> str:
+    return " ".join(
+        '"{0}"'.format(part) if " " in str(part) else str(part)
+        for part in command
+    )
 
 
 def run_command(
-    command: Sequence[str | os.PathLike[str]],
-    *,
+    command: Sequence[CommandPart],
     cwd: Path = ROOT,
-    env: dict[str, str] | None = None,
+    env: Optional[Dict[str, str]] = None,
 ) -> None:
-    printable = _display_command(command)
-    print(f"\n> {printable}", flush=True)
+    print("\n> {0}".format(_display_command(command)), flush=True)
     subprocess.run(
         [str(part) for part in command],
-        cwd=cwd,
+        cwd=str(cwd),
         env=env,
         check=True,
     )
 
 
-def require_supported_python() -> None:
-    if not ((3, 10) <= sys.version_info[:2] < (3, 15)):
-        raise RuntimeError(
-            "Road Matcher requires Python 3.10 through 3.14. "
-            f"The Make task is currently using {sys.version.split()[0]}. "
-            "On Windows, try: make setup PYTHON=\"py -3.12\""
-        )
+def capture_command(
+    command: Sequence[CommandPart],
+    cwd: Path = ROOT,
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [str(part) for part in command],
+        cwd=str(cwd),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
-def require_venv() -> Path:
-    if not VENV_PYTHON.is_file():
+def conda_executable() -> str:
+    """Return the Conda executable selected by Make or the current process."""
+    candidates = [
+        os.environ.get("ROAD_MATCHER_CONDA_EXE"),
+        os.environ.get("CONDA_EXE"),
+        "conda",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        cleaned = candidate.strip().strip('"')
+        candidate_path = Path(cleaned).expanduser()
+        if candidate_path.is_file():
+            return str(candidate_path.resolve())
+        resolved = shutil.which(cleaned)
+        if resolved:
+            return resolved
+    raise RuntimeError(
+        "Conda was not found. Run Make with the Conda executable path, for "
+        "example: make setup "
+        "CONDA=\"C:/tools/miniconda3/Scripts/conda.exe\""
+    )
+
+
+def requested_python_tuple() -> Tuple[int, int]:
+    pieces = CONDA_PYTHON_VERSION.split(".")
+    if len(pieces) != 2 or not all(piece.isdigit() for piece in pieces):
         raise RuntimeError(
-            f"Virtual environment not found at {VENV_DIR}. Run 'make setup' first."
+            "PYTHON_VERSION must use major.minor form, for example 3.12. "
+            "Received: {0}".format(CONDA_PYTHON_VERSION)
         )
-    return VENV_PYTHON
+    version = (int(pieces[0]), int(pieces[1]))
+    if version < (3, 10) or version >= (3, 15):
+        raise RuntimeError(
+            "Road Matcher supports Python 3.10 through 3.14. Requested: {0}"
+            .format(CONDA_PYTHON_VERSION)
+        )
+    return version
+
+
+def _normalized_path(path: Union[str, Path]) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def conda_run_command(*parts: CommandPart) -> List[str]:
+    return [
+        conda_executable(),
+        "run",
+        "--no-capture-output",
+        "--prefix",
+        str(CONDA_PREFIX),
+    ] + [str(part) for part in parts]
+
+
+def environment_python_info() -> Optional[Dict[str, object]]:
+    """Return local Conda Python information, or None when it is absent."""
+    if not CONDA_HISTORY.is_file():
+        return None
+
+    script = (
+        "import json, os, sys; "
+        "print(json.dumps({"
+        "'version': list(sys.version_info[:3]), "
+        "'executable': sys.executable, "
+        "'prefix': sys.prefix, "
+        "'conda_prefix': os.environ.get('CONDA_PREFIX')"
+        "}))"
+    )
+    result = capture_command(conda_run_command("python", "-c", script))
+    if result.returncode != 0:
+        return None
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        return json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return None
+
+
+def require_environment() -> Dict[str, object]:
+    info = environment_python_info()
+    if info is None:
+        raise RuntimeError(
+            "Project-local Conda environment not found at {0}. "
+            "Run 'make setup' first.".format(CONDA_PREFIX)
+        )
+
+    version_data = info.get("version")
+    if not isinstance(version_data, list) or len(version_data) < 2:
+        raise RuntimeError("Could not determine the local environment version.")
+
+    requested = requested_python_tuple()
+    actual = (int(version_data[0]), int(version_data[1]))
+    if actual != requested:
+        raise RuntimeError(
+            "The environment at {0} uses Python {1}.{2}, but Python {3} is "
+            "configured. Run 'make setup' to update it."
+            .format(
+                CONDA_PREFIX,
+                actual[0],
+                actual[1],
+                CONDA_PYTHON_VERSION,
+            )
+        )
+
+    actual_prefix = info.get("prefix")
+    if not isinstance(actual_prefix, str) or _normalized_path(actual_prefix) != _normalized_path(CONDA_PREFIX):
+        raise RuntimeError(
+            "Conda returned a different environment prefix. Expected {0}; got {1}."
+            .format(CONDA_PREFIX, actual_prefix)
+        )
+    return info
+
+
+def _prepare_prefix_for_conda() -> None:
+    """Remove only a legacy Python venv; reject unrelated non-Conda content."""
+    if not CONDA_PREFIX.exists() or CONDA_HISTORY.is_file():
+        return
+
+    try:
+        is_empty = not any(CONDA_PREFIX.iterdir())
+    except OSError as exc:
+        raise RuntimeError(
+            "Cannot inspect environment directory {0}: {1}".format(
+                CONDA_PREFIX, exc
+            )
+        )
+
+    if is_empty:
+        return
+
+    if (CONDA_PREFIX / "pyvenv.cfg").is_file():
+        print(
+            "Removing the earlier non-Conda virtual environment at {0}."
+            .format(CONDA_PREFIX)
+        )
+        shutil.rmtree(str(CONDA_PREFIX))
+        return
+
+    raise RuntimeError(
+        "{0} exists but is not a Conda environment. Move/delete that directory "
+        "or run 'make distclean', then run 'make setup' again."
+        .format(CONDA_PREFIX)
+    )
+
+
+def _create_or_update_environment() -> None:
+    conda = conda_executable()
+    requested_python_tuple()
+    _prepare_prefix_for_conda()
+
+    info = environment_python_info()
+    if info is None:
+        print(
+            "Creating project-local Conda environment at {0} with Python {1}."
+            .format(CONDA_PREFIX, CONDA_PYTHON_VERSION)
+        )
+        CONDA_PREFIX.parent.mkdir(parents=True, exist_ok=True)
+        run_command(
+            [
+                conda,
+                "create",
+                "--yes",
+                "--prefix",
+                str(CONDA_PREFIX),
+                "python={0}".format(CONDA_PYTHON_VERSION),
+                "pip",
+            ]
+        )
+        return
+
+    version_data = info.get("version")
+    actual: Optional[Tuple[int, int]] = None
+    if isinstance(version_data, list) and len(version_data) >= 2:
+        actual = (int(version_data[0]), int(version_data[1]))
+
+    requested = requested_python_tuple()
+    if actual != requested:
+        shown = "unknown" if actual is None else "{0}.{1}".format(*actual)
+        print(
+            "Updating local Conda environment from Python {0} to Python {1}."
+            .format(shown, CONDA_PYTHON_VERSION)
+        )
+        run_command(
+            [
+                conda,
+                "install",
+                "--yes",
+                "--prefix",
+                str(CONDA_PREFIX),
+                "python={0}".format(CONDA_PYTHON_VERSION),
+                "pip",
+            ]
+        )
+    else:
+        print(
+            "Using existing local Conda environment at {0}."
+            .format(CONDA_PREFIX)
+        )
 
 
 def setup() -> None:
-    require_supported_python()
-    if not VENV_PYTHON.is_file():
-        print(f"Creating virtual environment: {VENV_DIR}")
-        run_command([sys.executable, "-m", "venv", str(VENV_DIR)])
-    else:
-        print(f"Using existing virtual environment: {VENV_DIR}")
+    _create_or_update_environment()
+    run_command(
+        conda_run_command(
+            "python",
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "pip",
+            "setuptools",
+            "wheel",
+        )
+    )
+    run_command(
+        conda_run_command(
+            "python",
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            "requirements-dev.txt",
+        )
+    )
+    run_command(conda_run_command("python", "-m", "pip", "check"))
+    info = require_environment()
+    print("\nConda setup completed successfully.")
+    print("Environment prefix: {0}".format(CONDA_PREFIX))
+    print("Python executable: {0}".format(info.get("executable")))
+    print("Start the application with: make run")
 
-    python = require_venv()
-    run_command([python, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
-    run_command([python, "-m", "pip", "install", "-r", "requirements-dev.txt"])
-    run_command([python, "-m", "pip", "check"])
-    print("\nSetup completed. Start the application with: make run")
+
+def check_env() -> None:
+    info = require_environment()
+    print(
+        "Project-local Conda environment ready: {0} ({1})"
+        .format(CONDA_PREFIX, info.get("executable"))
+    )
+
+
+def require_runtime_python() -> None:
+    requested = requested_python_tuple()
+    actual = sys.version_info[:2]
+    if actual != requested:
+        raise RuntimeError(
+            "This target requires Python {0} from {1}. Current interpreter: {2}"
+            .format(CONDA_PYTHON_VERSION, CONDA_PREFIX, sys.executable)
+        )
+    if _normalized_path(sys.prefix) != _normalized_path(CONDA_PREFIX):
+        raise RuntimeError(
+            "This target must run inside the project-local Conda environment "
+            "at {0}. Current prefix: {1}".format(CONDA_PREFIX, sys.prefix)
+        )
 
 
 def run_app() -> None:
-    python = require_venv()
-    run_command([python, "main.py"])
+    require_runtime_python()
+    run_command([sys.executable, "main.py"])
 
 
 def test() -> None:
-    python = require_venv()
-    run_command([python, "-m", "pytest"])
+    require_runtime_python()
+    run_command([sys.executable, "-m", "pytest"])
 
 
 def verify() -> None:
-    python = require_venv()
-    run_command([python, "-m", "pip", "check"])
-    run_command([python, "-m", "pytest"])
-    run_command([python, "-m", "compileall", "-q", "app", "main.py", "scripts"])
+    require_runtime_python()
+    run_command([sys.executable, "-m", "pip", "check"])
+    run_command([sys.executable, "-m", "pytest"])
+    run_command(
+        [
+            sys.executable,
+            "-m",
+            "compileall",
+            "-q",
+            "app",
+            "main.py",
+            "scripts",
+        ]
+    )
     print("\nEnvironment, tests, and Python compilation checks passed.")
 
 
 def build() -> None:
-    python = require_venv()
+    require_runtime_python()
     test()
     run_command(
         [
-            python,
+            sys.executable,
             "-m",
             "PyInstaller",
             "--noconfirm",
@@ -114,14 +381,17 @@ def build() -> None:
         ]
     )
     if not DIST_EXE.exists():
-        raise RuntimeError(f"Build finished but expected executable was not found: {DIST_EXE}")
-    print(f"\nStandalone application created at: {DIST_EXE}")
+        raise RuntimeError(
+            "Build finished but the expected executable was not found: {0}"
+            .format(DIST_EXE)
+        )
+    print("\nStandalone application created at: {0}".format(DIST_EXE))
 
 
 def _candidate_iscc_paths() -> Iterable[Path]:
     configured = os.environ.get("ISCC_EXE")
     if configured:
-        yield Path(configured).expanduser()
+        yield Path(configured.strip().strip('"')).expanduser()
 
     for executable_name in ("ISCC.exe", "ISCC", "iscc"):
         resolved = shutil.which(executable_name)
@@ -143,27 +413,28 @@ def find_iscc() -> Path:
             return candidate.resolve()
     raise RuntimeError(
         "Inno Setup 6 compiler (ISCC.exe) was not found. Install Inno Setup 6, "
-        "ensure ISCC.exe is on PATH, or set ISCC_EXE to its full path. Example: "
-        "make installer ISCC_EXE=\"C:/Program Files (x86)/Inno Setup 6/ISCC.exe\""
+        "put ISCC.exe on PATH, or run: make installer "
+        "ISCC_EXE=\"C:/Program Files (x86)/Inno Setup 6/ISCC.exe\""
     )
 
 
 def compile_installer() -> None:
+    require_runtime_python()
     if os.name != "nt":
         raise RuntimeError("The Inno Setup installer must be compiled on Windows.")
     if not DIST_EXE.exists():
         raise RuntimeError(
-            f"Standalone build not found at {DIST_EXE}. Run 'make build' first, "
-            "or run 'make installer' to build and package in one command."
+            "Standalone build not found at {0}. Run 'make build' first, or use "
+            "'make installer'.".format(DIST_EXE)
         )
     iscc = find_iscc()
     run_command([iscc, str(INNO_SCRIPT)])
     if not INSTALLER_OUTPUT.exists():
         raise RuntimeError(
-            "Inno Setup completed but the expected installer was not found at "
-            f"{INSTALLER_OUTPUT}"
+            "Inno Setup completed but the expected installer was not found: {0}"
+            .format(INSTALLER_OUTPUT)
         )
-    print(f"\nWindows installer created at: {INSTALLER_OUTPUT}")
+    print("\nWindows installer created at: {0}".format(INSTALLER_OUTPUT))
 
 
 def installer() -> None:
@@ -173,17 +444,17 @@ def installer() -> None:
 
 def _remove(path: Path) -> None:
     if path.is_dir():
-        print(f"Removing directory: {path}")
-        shutil.rmtree(path, ignore_errors=False)
+        print("Removing directory: {0}".format(path))
+        shutil.rmtree(str(path), ignore_errors=False)
     elif path.exists():
-        print(f"Removing file: {path}")
+        print("Removing file: {0}".format(path))
         path.unlink()
 
 
-def _is_inside_virtual_environment(path: Path) -> bool:
+def _is_inside_conda_prefix(path: Path) -> bool:
     try:
-        path.relative_to(VENV_DIR)
-    except ValueError:
+        path.resolve().relative_to(CONDA_PREFIX)
+    except (ValueError, OSError):
         return False
     return True
 
@@ -192,12 +463,10 @@ def clean() -> None:
     for relative in ("build", "dist", "installer_output", ".pytest_cache"):
         _remove(ROOT / relative)
 
-    # Keep normal cleanup fast by not traversing/deleting caches inside .venv.
-    # The complete virtual environment is removed once by the distclean target.
     cache_dirs = [
         path
         for path in ROOT.rglob("__pycache__")
-        if not _is_inside_virtual_environment(path)
+        if not _is_inside_conda_prefix(path)
     ]
     for cache_dir in sorted(cache_dirs, reverse=True):
         _remove(cache_dir)
@@ -206,7 +475,7 @@ def clean() -> None:
         path
         for pattern in ("*.pyc", "*.pyo")
         for path in ROOT.rglob(pattern)
-        if not _is_inside_virtual_environment(path)
+        if not _is_inside_conda_prefix(path)
     ]
     for compiled_file in compiled_files:
         _remove(compiled_file)
@@ -214,42 +483,87 @@ def clean() -> None:
     print("\nBuild artifacts and project Python caches removed.")
 
 
+def remove_conda_environment() -> None:
+    if CONDA_HISTORY.is_file():
+        run_command(
+            [
+                conda_executable(),
+                "env",
+                "remove",
+                "--yes",
+                "--prefix",
+                str(CONDA_PREFIX),
+            ]
+        )
+
+    if CONDA_PREFIX.exists():
+        _remove(CONDA_PREFIX)
+    else:
+        print("Local Conda environment is already absent: {0}".format(CONDA_PREFIX))
+
+
 def distclean() -> None:
     clean()
-    _remove(VENV_DIR)
-    print("\nVirtual environment also removed. Source code and user output files were preserved.")
+    remove_conda_environment()
+    print(
+        "\nThe project-local Conda environment and generated build files were "
+        "removed. Source code and user output files were preserved."
+    )
 
 
 def rebuild() -> None:
+    require_runtime_python()
     clean()
     build()
 
 
+def doctor() -> None:
+    conda = conda_executable()
+    requested_python_tuple()
+    version_result = capture_command([conda, "--version"])
+    print("Road Matcher environment diagnostics")
+    print("Project root: {0}".format(ROOT))
+    print("Conda executable: {0}".format(conda))
+    print("Conda version: {0}".format(version_result.stdout.strip()))
+    print("Configured local prefix: {0}".format(CONDA_PREFIX))
+    print("Configured Python: {0}".format(CONDA_PYTHON_VERSION))
+    print("Task runner exists: {0}".format(Path(__file__).is_file()))
+    print("Conda marker exists: {0}".format(CONDA_HISTORY.is_file()))
+
+    info = environment_python_info()
+    if info is None:
+        print("Environment status: NOT CREATED")
+        print("Next command: make setup")
+        return
+
+    version_data = info.get("version")
+    version_text = "unknown"
+    if isinstance(version_data, list):
+        version_text = ".".join(str(value) for value in version_data)
+    print("Environment status: READY")
+    print("Environment Python version: {0}".format(version_text))
+    print("Environment Python executable: {0}".format(info.get("executable")))
+    print("Environment prefix: {0}".format(info.get("prefix")))
+
+
 def show_help() -> None:
     print(
-        """Road Matcher Desktop Make targets
+        """Road Matcher Desktop project-local Conda tasks
 
-  make setup           Create .venv and install runtime/build/test dependencies
+  make setup           Create/update ./.venv with Conda
   make run             Launch the PySide6 desktop application
   make test            Run the automated test suite
-  make verify          Run pip check, tests, and Python compilation checks
+  make verify          Run pip check, tests, and compilation checks
   make build           Test and create dist/RoadMatcher/RoadMatcher.exe
-  make installer       Build the application and compile the Inno Setup installer
-  make installer-only  Compile the installer from an existing standalone build
-  make clean           Remove build outputs and Python caches
-  make distclean       Run clean and also remove .venv
+  make installer       Build and compile the Inno Setup installer
+  make installer-only  Compile installer from an existing app build
+  make clean           Remove build outputs and project Python caches
+  make distclean       Clean and remove the local ./.venv environment
   make rebuild         Clean, test, and rebuild the standalone application
+  make doctor          Show Conda/local-environment diagnostics
   make help            Show this command list
 
-Windows notes:
-  - GNU Make must be available as 'make'. Some toolchains expose it as
-    'mingw32-make'; use the same target names with that command.
-  - The default Windows interpreter command is: py
-  - Override it when needed, for example:
-      make setup PYTHON=python
-      make setup PYTHON=\"C:/Python312/python.exe\"
-  - Installer creation requires Inno Setup 6. If it is not auto-detected:
-      make installer ISCC_EXE=\"C:/Program Files (x86)/Inno Setup 6/ISCC.exe\"
+No manual conda activation and no py/python launcher selection are required.
 """
     )
 
@@ -260,6 +574,8 @@ def parse_args() -> argparse.Namespace:
         "task",
         choices=(
             "help",
+            "check-env",
+            "doctor",
             "setup",
             "run",
             "test",
@@ -279,6 +595,8 @@ def main() -> int:
     args = parse_args()
     actions = {
         "help": show_help,
+        "check-env": check_env,
+        "doctor": doctor,
         "setup": setup,
         "run": run_app,
         "test": test,
@@ -293,7 +611,7 @@ def main() -> int:
     try:
         actions[args.task]()
     except (RuntimeError, subprocess.CalledProcessError, OSError) as exc:
-        print(f"\nERROR: {exc}", file=sys.stderr)
+        print("\nERROR: {0}".format(exc), file=sys.stderr)
         return 1
     return 0
 

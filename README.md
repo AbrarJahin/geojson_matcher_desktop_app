@@ -14,50 +14,68 @@ This project converts the supplied Colab notebook into a local PySide6 desktop a
 
 The original validated analytical cells are retained in `app/core/legacy_program.py` and executed in a controlled compatibility namespace. The PySide6 UI and service wrapper replace only notebook/Colab concerns. This migration strategy minimizes numerical and decision-flow changes.
 
-The Makefile delegates cross-platform process and filesystem work to `scripts/project_tasks.py`. This avoids PowerShell activation scripts and execution-policy requirements. It does not change the desktop application or matching algorithm.
+The Makefile delegates process, test, build, and installer operations to `scripts/project_tasks.py`. The development environment is a **project-local Conda prefix** stored at `./.venv`. No PowerShell activation script, batch file, `py` launcher, or manually activated Conda environment is required.
 
-No `.ps1` or `.bat` files are required or included. All development, testing, packaging, and installer operations are exposed through Make targets.
+## Required development tools
 
-## Supported environment
+Use 64-bit Windows 10 or Windows 11 with:
 
-Use 64-bit Windows 10 or Windows 11 and Python 3.12 for the simplest build path. Python is required only on the development/build computer. The generated standalone application includes the Python runtime for end users.
+- Miniconda or Anaconda, with `conda` available in the terminal.
+- GNU Make, available as `make` or `mingw32-make`.
+- Inno Setup 6 only when creating the final Windows installer.
 
-GNU Make must be installed and available as `make`. Some MinGW installations expose it as `mingw32-make`; when that is the case, replace `make` with `mingw32-make` in every command below.
+Your existing Conda base environment may use Python 3.9. That is acceptable. `make setup` uses Conda itself to create a separate Python 3.12 environment inside this repository:
+
+```text
+RoadMatcherDesktop\.venv
+```
+
+The generated standalone application includes Python for end users.
 
 ## Setup and run from VS Code
 
-Extract the project and open its root folder in VS Code. Run the following commands from the VS Code terminal:
+Extract the project, open its root folder in VS Code, and run:
 
 ```text
+make help
+make doctor
 make setup
 make run
 ```
 
-`make setup` performs all of the following without activating the virtual environment:
+`make setup` performs these operations:
 
-- Creates `.venv`.
-- Upgrades `pip`, `setuptools`, and `wheel`.
-- Installs runtime, test, and packaging dependencies.
-- Runs `pip check`.
+1. Uses the `conda` executable, not the `py` or `python` command on `PATH`.
+2. Creates a Conda prefix at `./.venv` with Python 3.12 and pip.
+3. Upgrades pip, setuptools, and wheel inside that prefix.
+4. Installs `requirements-dev.txt` inside the local prefix.
+5. Runs `pip check`.
 
-The default Windows Python launcher is `py`. To use Python 3.12 explicitly:
-
-```text
-make setup PYTHON="py -3.12"
-```
-
-To use a `python` executable already available on `PATH`:
+Every subsequent command uses:
 
 ```text
-make setup PYTHON=python
+conda run --prefix <project>/.venv ...
 ```
 
-After setup, every target invokes `.venv` directly; no PowerShell activation or execution-policy change is required.
+You do not need to run `conda activate`.
+
+The Makefile automatically prefers `C:\tools\miniconda3\Scripts\conda.exe` when that file exists. If Conda is installed elsewhere or is not found, use:
+
+```text
+make setup CONDA="C:/tools/miniconda3/Scripts/conda.exe"
+```
+
+The same override can be supplied to any target:
+
+```text
+make run CONDA="C:/tools/miniconda3/Scripts/conda.exe"
+```
 
 ## Complete Make commands
 
 ```text
 make help
+make doctor
 make setup
 make run
 make test
@@ -72,16 +90,28 @@ make rebuild
 
 | Command | Purpose |
 |---|---|
-| `make setup` | Create `.venv` and install all required dependencies. |
-| `make run` | Start the PySide6 desktop application. |
-| `make test` | Run the automated tests. |
+| `make help` | Show available commands without invoking Python. |
+| `make doctor` | Display Conda, environment-prefix, and Python diagnostics. |
+| `make setup` | Create/update the local `.venv` Conda prefix and install dependencies. |
+| `make run` | Start the PySide6 desktop application through the local prefix. |
+| `make test` | Run the automated tests through the local prefix. |
 | `make verify` | Run dependency, test, and Python compilation checks. |
 | `make build` | Test and create the standalone application folder. |
 | `make installer` | Build the application and create the Windows installer. |
 | `make installer-only` | Create the installer from an existing standalone build. |
-| `make clean` | Delete build output and Python cache directories. |
-| `make distclean` | Run `clean` and also delete `.venv`. |
-| `make rebuild` | Clean and rebuild the standalone application. |
+| `make clean` | Delete build output and project caches while preserving `.venv`. |
+| `make distclean` | Run `clean` and remove the local `.venv` Conda prefix. |
+| `make rebuild` | Clean, test, and rebuild the standalone application. |
+
+## VS Code interpreter
+
+After `make setup`, select this interpreter in VS Code:
+
+```text
+<project>\.venv\python.exe
+```
+
+The application still runs through `make run`; selecting the interpreter improves editing, linting, and debugging in VS Code.
 
 ## Application workflow
 
@@ -128,22 +158,21 @@ The build is intentionally **one-folder**, not one-file. GIS libraries, Qt plugi
 
 ## Build the Windows installer
 
-1. Install Inno Setup 6.
-2. Run:
+Install Inno Setup 6, then run:
 
 ```text
 make installer
 ```
 
-The command runs tests, builds the standalone application, locates `ISCC.exe`, and compiles `installer\RoadMatcher.iss`.
+The command runs tests, creates the standalone application, locates `ISCC.exe`, and compiles `installer\RoadMatcher.iss`.
 
-If Inno Setup is installed in a nonstandard location, provide the compiler path:
+For a nonstandard Inno Setup location:
 
 ```text
 make installer ISCC_EXE="C:/Program Files (x86)/Inno Setup 6/ISCC.exe"
 ```
 
-To compile the installer without rebuilding the application:
+To compile the installer without rebuilding:
 
 ```text
 make installer-only
@@ -155,21 +184,35 @@ The installer is written to:
 installer_output\RoadMatcher-Setup-1.0.0.exe
 ```
 
-The installed application runs without a separate Python installation.
+The installed application runs without a separate Python or Conda installation.
 
 ## Cleaning generated files
 
-Remove build products and Python caches while preserving `.venv`, source code, selected GeoJSON files, and user output files:
+Preserve the local Conda environment but remove build products and source-tree caches:
 
 ```text
 make clean
 ```
 
-Also remove `.venv`:
+Remove build products and the complete local Conda environment:
 
 ```text
 make distclean
 ```
+
+Recreate it later with `make setup`.
+
+## Environment definition and source control
+
+`environment.yml` records the required Conda base environment: Python 3.12 and pip. The machine-specific local prefix is supplied by the Makefile and is intentionally not embedded in the YAML file.
+
+The root `.gitignore` contains:
+
+```text
+/.venv/
+```
+
+Therefore, the large local Conda environment will not be committed to Git.
 
 ## Basemap behavior
 

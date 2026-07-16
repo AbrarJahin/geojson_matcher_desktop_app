@@ -1,0 +1,7 @@
+# Reproducible base definition for the project-local Conda environment.
+# The Make workflow supplies the machine-specific prefix: ./.venv
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip

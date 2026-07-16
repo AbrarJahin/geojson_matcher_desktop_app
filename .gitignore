@@ -1,9 +1,20 @@
-.venv/
+# Project-local Conda environment created by `make setup`.
+/.venv/
+
+# Python caches and test state.
 __pycache__/
 *.py[cod]
 .pytest_cache/
-build/
-dist/
-installer_output/
+.coverage
+htmlcov/
+
+# Packaging output.
+/build/
+/dist/
+/installer_output/
 *.spec.bak
+
+# Local OS/editor files.
 .DS_Store
+Thumbs.db
+.vscode/settings.json
