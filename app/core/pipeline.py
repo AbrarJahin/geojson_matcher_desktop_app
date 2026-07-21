@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -139,12 +140,106 @@ class RoadMatchingPipeline:
             self.log(value)
         return value
 
+    @staticmethod
+    def _latest_progress_path(state_dir: Path, pair_run_key: str) -> Path:
+        """Return the newest usable progress file for this input pair."""
+        primary = state_dir / f"{pair_run_key}_manual_review_progress.csv"
+        candidates = [primary]
+        candidates.extend(
+            state_dir.glob(f"{pair_run_key}_manual_review_progress_recovery_*.csv")
+        )
+        existing = [path for path in candidates if path.is_file()]
+        if not existing:
+            return primary
+        return max(existing, key=lambda path: path.stat().st_mtime_ns)
+
+    @staticmethod
+    def _assert_directory_writable(directory: Path, label: str) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / f".road_matcher_write_test_{os.getpid()}"
+        try:
+            probe.write_text("ok", encoding="utf-8")
+        except OSError as exc:
+            raise PermissionError(
+                f"{label} is not writable: {directory}\n"
+                "Choose a normal user folder such as Documents or Desktop, "
+                "and do not use Program Files or a read-only/network location."
+            ) from exc
+        finally:
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _manual_progress_frame(self) -> pd.DataFrame:
+        frame = self.decision_df
+        manual_rows = frame.loc[
+            frame["requires_manual_verification"],
+            [
+                "pair_key",
+                "county_1_id",
+                "county_2_id",
+                "manual_pair_number",
+                "manual_batch_id",
+                "manual_decision",
+            ],
+        ].copy()
+        manual_rows["source_file_1"] = str(self.config.county_file_1)
+        manual_rows["source_file_2"] = str(self.config.county_file_2)
+        manual_rows["saved_at"] = datetime.now().isoformat(timespec="seconds")
+        return manual_rows
+
+    def _save_manual_progress_safely(self) -> Path:
+        """Persist review progress without allowing a Windows file lock to stop review."""
+        target = Path(self.namespace["MANUAL_PROGRESS_CSV"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        manual_rows = self._manual_progress_frame()
+        temp_path = target.with_name(
+            f".{target.name}.{os.getpid()}.{datetime.now().strftime('%H%M%S%f')}.tmp"
+        )
+        manual_rows.to_csv(temp_path, index=False)
+
+        last_error: OSError | None = None
+        for delay in (0.0, 0.05, 0.15, 0.30, 0.60):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(temp_path, target)
+                return target
+            except (PermissionError, OSError) as exc:
+                last_error = exc
+
+        # Excel, OneDrive, antivirus, or another process can temporarily lock
+        # the primary CSV on Windows. Save to a recovery CSV and continue.
+        recovery_path = target.with_name(
+            f"{target.stem}_recovery_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.csv"
+        )
+        try:
+            os.replace(temp_path, recovery_path)
+        except OSError:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise PermissionError(
+                "The manual-review progress could not be saved. Close any open "
+                "progress CSV in Excel, confirm the folder is writable, and try again. "
+                f"Target: {target}"
+            ) from last_error
+
+        self.namespace["MANUAL_PROGRESS_CSV"] = recovery_path
+        self.log(
+            "The normal progress CSV was locked, so progress was saved safely to: "
+            f"{recovery_path}"
+        )
+        return recovery_path
+
     def _build_namespace(self) -> dict[str, Any]:
         cfg = self.config
         output_dir = cfg.output_dir
         state_dir = output_dir / ".road_matcher_state"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        state_dir.mkdir(parents=True, exist_ok=True)
+        self._assert_directory_writable(output_dir, "Output folder")
+        self._assert_directory_writable(state_dir, "Manual-review state folder")
 
         run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pair_run_key = (
@@ -205,7 +300,7 @@ class RoadMatchingPipeline:
             "STATE_DIR": state_dir,
             "RUN_TIMESTAMP": run_timestamp,
             "PAIR_RUN_KEY": pair_run_key,
-            "MANUAL_PROGRESS_CSV": state_dir / f"{pair_run_key}_manual_review_progress.csv",
+            "MANUAL_PROGRESS_CSV": self._latest_progress_path(state_dir, pair_run_key),
             "SECTION_24_OUTPUT_CSV": output_dir / f"{pair_run_key}_final_pair_decisions.csv",
             "DECISION_AUDIT_CSV": output_dir / f"{pair_run_key}_decision_audit_{run_timestamp}.csv",
             "CONNECTION_AUDIT_CSV": output_dir / f"{pair_run_key}_connection_audit_{run_timestamp}.csv",
@@ -219,6 +314,12 @@ class RoadMatchingPipeline:
         self.log(f"Output directory: {self.config.output_dir}")
         self.log("Running retained notebook analysis pipeline...")
         execute_legacy_pipeline(self.namespace, stage_callback=stage_callback)
+        decision_frame = self.namespace["section_24_decision_df"]
+        # Explicit object dtype prevents strict pandas builds from rejecting
+        # the string values "yes" and "no" when the column began as all NA.
+        decision_frame["manual_decision"] = decision_frame["manual_decision"].astype("object")
+        self.namespace["section_24_decision_df"] = decision_frame
+        self.namespace["_save_manual_progress"] = self._save_manual_progress_safely
         self._analysis_complete = True
         self.log("Analysis pipeline completed.")
         return self
@@ -299,10 +400,21 @@ class RoadMatchingPipeline:
         row_index = matches[0]
         if not bool(frame.at[row_index, "requires_manual_verification"]):
             raise ValueError("The selected pair is not part of the manual-review queue.")
+        if frame["manual_decision"].dtype != object:
+            frame["manual_decision"] = frame["manual_decision"].astype("object")
+        previous_value = frame.at[row_index, "manual_decision"]
         frame.at[row_index, "manual_decision"] = normalized
         self.namespace["section_24_decision_df"] = frame
-        self.namespace["_save_manual_progress"]()
-        self.log(f"Saved manual decision {normalized.upper()} for {pair_key}.")
+        try:
+            saved_path = self._save_manual_progress_safely()
+        except Exception:
+            frame.at[row_index, "manual_decision"] = previous_value
+            self.namespace["section_24_decision_df"] = frame
+            raise
+        self.log(
+            f"Saved manual decision {normalized.upper()} for {pair_key}. "
+            f"Progress file: {saved_path}"
+        )
 
     def context_layers(self) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
         self._require_analysis()

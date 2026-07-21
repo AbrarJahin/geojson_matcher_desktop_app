@@ -63,3 +63,38 @@ def test_pipeline_runs_on_synthetic_geojson(tmp_path: Path) -> None:
     assert result.final_decisions_csv.exists()
     assert result.decision_audit_csv.exists()
     assert result.connection_audit_csv.exists()
+
+
+def test_manual_decision_uses_recovery_file_when_primary_is_locked(tmp_path: Path, monkeypatch) -> None:
+    first = tmp_path / "Alpha.geojson"
+    second = tmp_path / "Beta.geojson"
+    _write_roads(first, 1, 0.0)
+    _write_roads(second, 101, 0.00005)
+    pipeline = RoadMatchingPipeline(
+        PipelineConfig(first, second, tmp_path / "output", buffer_distance_meters=80.0)
+    )
+    pipeline.run_analysis()
+    row = pipeline.review_rows().iloc[0]
+
+    import app.core.pipeline as pipeline_module
+
+    real_replace = pipeline_module.os.replace
+    primary = Path(pipeline.namespace["MANUAL_PROGRESS_CSV"])
+    attempts = {"count": 0}
+
+    def simulated_replace(source, destination):
+        destination_path = Path(destination)
+        if destination_path == primary:
+            attempts["count"] += 1
+            raise PermissionError("simulated Windows lock")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(pipeline_module.os, "replace", simulated_replace)
+    pipeline.record_manual_decision(str(row["pair_key"]), "yes")
+
+    recovery = Path(pipeline.namespace["MANUAL_PROGRESS_CSV"])
+    assert attempts["count"] >= 1
+    assert recovery != primary
+    assert recovery.exists()
+    assert "recovery" in recovery.name
+    assert pipeline.review_summary()["completed"] == 1

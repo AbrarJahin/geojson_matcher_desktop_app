@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -35,6 +35,7 @@ class ManualReviewDialog(QDialog):
     def __init__(self, pipeline: Any, include_basemap: bool = True, parent: Any = None):
         super().__init__(parent)
         self.pipeline = pipeline
+        self._changing_pair = False
         self.rows = pipeline.review_rows(include_completed=True)
         self.current_index = self._first_pending_index()
         self.setWindowTitle("Manual Road-Pair Verification")
@@ -58,7 +59,7 @@ class ManualReviewDialog(QDialog):
         self.progress.setMinimum(0)
         self.progress.setMaximum(max(len(self.rows), 1))
 
-        self.basemap_checkbox = QCheckBox("Online street basemap")
+        self.basemap_checkbox = QCheckBox("Online street basemap (loads asynchronously)")
         self.basemap_checkbox.setChecked(include_basemap)
         self.basemap_checkbox.toggled.connect(self._redraw)
 
@@ -171,20 +172,43 @@ class ManualReviewDialog(QDialog):
             self.current_index += 1
             self._show_current()
 
+    def _set_transition_controls_enabled(self, enabled: bool) -> None:
+        self.no_button.setEnabled(enabled)
+        self.yes_button.setEnabled(enabled)
+        self.previous_button.setEnabled(enabled and self.current_index > 0)
+        self.next_button.setEnabled(enabled and self.current_index < len(self.rows) - 1)
+        self.basemap_checkbox.setEnabled(enabled)
+
+    def _finish_pair_transition(self) -> None:
+        try:
+            self._show_current()
+        finally:
+            self._changing_pair = False
+            self._set_transition_controls_enabled(True)
+
     def _record(self, decision: str) -> None:
-        if self.rows.empty:
+        if self.rows.empty or self._changing_pair:
             return
+
+        self._changing_pair = True
+        self._set_transition_controls_enabled(False)
+        self.saved_label.setText(f"Saving decision: {decision.upper()}...")
+
         row = self._row()
         try:
             self.pipeline.record_manual_decision(str(row["pair_key"]), decision)
             self.rows.at[self.rows.index[self.current_index], "manual_decision"] = decision
         except Exception as exc:
+            self._changing_pair = False
+            self._set_transition_controls_enabled(True)
             QMessageBox.critical(self, "Could not save decision", str(exc))
             return
 
         pending_positions = self.rows.index[self.rows["manual_decision"].isna()].tolist()
         if not pending_positions:
             self._show_current()
+            self._changing_pair = False
+            self._set_transition_controls_enabled(True)
             QMessageBox.information(
                 self,
                 "Manual review complete",
@@ -196,4 +220,8 @@ class ManualReviewDialog(QDialog):
 
         later = [position for position in pending_positions if position > self.current_index]
         self.current_index = int(later[0] if later else pending_positions[0])
-        self._show_current()
+
+        # Return control to Qt before drawing the next pair. This lets the
+        # button state and saved status repaint immediately and prevents fast
+        # repeated clicks from queuing duplicate decisions.
+        QTimer.singleShot(0, self._finish_pair_transition)

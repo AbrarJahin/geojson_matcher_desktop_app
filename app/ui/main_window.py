@@ -52,7 +52,7 @@ class MainWindow(QMainWindow):
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 1000)
         self.batch_spin.setValue(30)
-        self.basemap_checkbox = QCheckBox("Show online street basemap during manual review")
+        self.basemap_checkbox = QCheckBox("Show online street basemap during manual review (loads asynchronously)")
         self.basemap_checkbox.setChecked(True)
 
         self.analyze_button = QPushButton("Analyze GeoJSON Files")

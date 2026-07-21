@@ -240,3 +240,20 @@ The tests compile all retained notebook cells, validate configuration behavior, 
 ## Licensing note
 
 PySide6/Qt licensing obligations depend on distribution and procurement circumstances. Review Qt's applicable open-source or commercial license terms before external deployment, especially for government distribution.
+
+## Manual-review button reliability
+
+The desktop review window saves every Yes/No choice immediately. The save path is
+`<output folder>/.road_matcher_state/`.
+
+This version includes the following safeguards:
+
+- online basemap tiles load on a worker thread, so slow internet does not freeze the UI;
+- decision buttons are temporarily disabled during pair transitions to prevent duplicate clicks;
+- manual decisions are stored with an explicit string-compatible dtype;
+- progress files are written atomically with retries;
+- if Windows, Excel, OneDrive, or antivirus locks the normal progress CSV, the app writes a timestamped recovery CSV and continues;
+- the selected output and state folders are tested for write access before analysis starts.
+
+If a permission dialog still appears, close any progress/final CSV opened in Excel and
+select a writable output folder under Documents or Desktop rather than Program Files.
