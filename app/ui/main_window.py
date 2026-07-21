@@ -65,11 +65,9 @@ class MainWindow(QMainWindow):
 
         self.analyze_button = QPushButton("Analyze GeoJSON Files")
         self.review_button = QPushButton("Open / Resume Manual Review")
-        self.finalize_button = QPushButton("Create Final Outputs")
         self.open_output_button = QPushButton("Open Output Folder")
         self.quit_button = QPushButton("Save Session && Quit Application")
         self.review_button.setEnabled(False)
-        self.finalize_button.setEnabled(False)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
@@ -86,7 +84,6 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout()
         actions.addWidget(self.analyze_button)
         actions.addWidget(self.review_button)
-        actions.addWidget(self.finalize_button)
         actions.addWidget(self.open_output_button)
         actions.addWidget(self.quit_button)
 
@@ -104,7 +101,6 @@ class MainWindow(QMainWindow):
 
         self.analyze_button.clicked.connect(self._start_analysis)
         self.review_button.clicked.connect(self._open_review)
-        self.finalize_button.clicked.connect(self._start_finalization)
         self.open_output_button.clicked.connect(self._open_output_folder)
         self.quit_button.clicked.connect(self.close)
 
@@ -140,7 +136,7 @@ class MainWindow(QMainWindow):
         form.addRow("Stable road ID column", self.road_id_edit)
         form.addRow("Projected CRS", self.target_crs_edit)
         form.addRow("Candidate search distance", self.buffer_spin)
-        form.addRow("Maximum manual batch size", self.batch_spin)
+        form.addRow("Notebook rows per review batch", self.batch_spin)
         form.addRow("Map", self.basemap_checkbox)
         return group
 
@@ -251,7 +247,6 @@ class MainWindow(QMainWindow):
     def _set_busy(self, busy: bool, status: str) -> None:
         self.analyze_button.setEnabled(not busy)
         self.review_button.setEnabled(not busy and self.pipeline is not None)
-        self.finalize_button.setEnabled(not busy and self.pipeline is not None)
         self.quit_button.setEnabled(not busy)
         self.progress.setRange(0, 0 if busy else 1)
         if not busy:
@@ -311,13 +306,15 @@ class MainWindow(QMainWindow):
         )
         self.summary_label.setText(
             f"Candidate pairs: {summary['total_candidates']} | "
-            f"Manual review selected: {summary['selected']} | "
+            f"Manual review selected: {summary['selected']} "
+            f"({summary['selected_fraction']:.2%}) | "
+            f"Allowed count: {summary['minimum_review_count']}–"
+            f"{summary['maximum_review_count']} | "
             f"Completed: {summary['completed']} | Remaining: {summary['remaining']} | "
             f"Optimized threshold: {summary['threshold']:.6f}<br>{session_text}"
         )
         self._set_busy(False, "Analysis complete.")
         self.review_button.setEnabled(summary["selected"] > 0)
-        self.finalize_button.setEnabled(summary["remaining"] == 0)
         if summary["remaining"] > 0:
             self._open_review()
         else:
@@ -335,12 +332,14 @@ class MainWindow(QMainWindow):
         summary = self.pipeline.review_summary()
         self.summary_label.setText(
             f"Candidate pairs: {summary['total_candidates']} | "
-            f"Manual review selected: {summary['selected']} | "
+            f"Manual review selected: {summary['selected']} "
+            f"({summary['selected_fraction']:.2%}) | "
+            f"Allowed count: {summary['minimum_review_count']}–"
+            f"{summary['maximum_review_count']} | "
             f"Completed: {summary['completed']} | Remaining: {summary['remaining']} | "
             f"Optimized threshold: {summary['threshold']:.6f}<br>"
             f"Session file: {self.pipeline.session_path}"
         )
-        self.finalize_button.setEnabled(summary["remaining"] == 0)
         if summary["remaining"] == 0:
             self._start_finalization()
 

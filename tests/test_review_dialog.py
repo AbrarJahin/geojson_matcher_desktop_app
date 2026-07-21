@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import geopandas as gpd
 import pandas as pd
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 from shapely.geometry import LineString, Point
 
 from app.ui.map_canvas import InteractiveMapCanvas
@@ -14,7 +14,11 @@ from app.ui.review_dialog import ManualReviewDialog
 
 class FakePipeline:
     def __init__(self, tmp_path: Path) -> None:
-        self.config = SimpleNamespace(target_crs="EPSG:26916")
+        self.config = SimpleNamespace(
+            target_crs="EPSG:26916",
+            min_manual_review_fraction=0.02,
+            max_manual_review_fraction=0.30,
+        )
         self.county_1_name = "Alpha"
         self.county_2_name = "Beta"
         self.optimized_threshold = 0.5
@@ -29,6 +33,7 @@ class FakePipeline:
                     "county_1_id": "1",
                     "county_2_id": "101",
                     "manual_pair_number": 1,
+                    "manual_review_rank": 1,
                     "manual_batch_id": 1,
                     "manual_decision": pd.NA,
                     "geometric_valid_pair_probability": 0.9,
@@ -41,6 +46,7 @@ class FakePipeline:
                     "county_1_id": "2",
                     "county_2_id": "102",
                     "manual_pair_number": 2,
+                    "manual_review_rank": 2,
                     "manual_batch_id": 1,
                     "manual_decision": pd.NA,
                     "geometric_valid_pair_probability": 0.2,
@@ -67,6 +73,17 @@ class FakePipeline:
         if not include_completed:
             rows = rows.loc[rows["manual_decision"].isna()].copy()
         return rows.reset_index(drop=True)
+
+    def manual_review_diagnostics(self):
+        return {
+            "selected": 2,
+            "total_candidates": 10,
+            "selected_fraction": 0.2,
+            "minimum": 1,
+            "maximum": 3,
+            "minimum_fraction": 0.02,
+            "maximum_fraction": 0.30,
+        }
 
     def pair_features(self, county_1_id: str, county_2_id: str) -> pd.Series:
         return pd.Series(
@@ -106,14 +123,26 @@ def _app() -> QApplication:
     return app
 
 
+def test_review_queue_is_lowest_to_highest_probability(tmp_path: Path) -> None:
+    _app()
+    pipeline = FakePipeline(tmp_path)
+    dialog = ManualReviewDialog(pipeline, include_basemap=False)
+    probabilities = pd.to_numeric(dialog.rows["probablity"]).tolist()
+    assert probabilities == sorted(probabilities)
+    assert dialog.rows.iloc[0]["pair_key"] == "2||102"
+    assert "lowest combined probability" in dialog.policy_label.text()
+    dialog.close()
+
+
 def test_yes_no_and_review_close_stay_in_ram_until_application_quit(tmp_path: Path) -> None:
     app = _app()
     pipeline = FakePipeline(tmp_path)
     dialog = ManualReviewDialog(pipeline, include_basemap=False)
 
+    # Lowest probability row is shown first.
     dialog._record("yes")
     app.processEvents()
-    assert pipeline._decisions["1||101"] == "yes"
+    assert pipeline._decisions["2||102"] == "yes"
     assert pipeline.saved_calls == 0
     assert not pipeline.session_file.exists()
 
@@ -128,6 +157,46 @@ def test_yes_no_and_review_close_stay_in_ram_until_application_quit(tmp_path: Pa
     assert pipeline.session_file.exists()
 
 
+def test_final_manual_decision_closes_without_intermediate_popup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app()
+    pipeline = FakePipeline(tmp_path)
+    dialog = ManualReviewDialog(pipeline, include_basemap=False)
+    popup_calls: list[tuple] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda *args, **kwargs: popup_calls.append((args, kwargs)),
+    )
+
+    dialog._record("yes")
+    app.processEvents()
+    dialog._record("no")
+    app.processEvents()
+
+    assert popup_calls == []
+    assert dialog.result() == int(dialog.DialogCode.Accepted)
+    assert all(pd.notna(value) for value in pipeline._decisions.values())
+
+
+def test_review_window_uses_available_screen_and_left_sidebar(tmp_path: Path) -> None:
+    app = _app()
+    pipeline = FakePipeline(tmp_path)
+    dialog = ManualReviewDialog(pipeline, include_basemap=False)
+    dialog.show()
+    app.processEvents()
+    dialog._fit_to_available_screen()
+    app.processEvents()
+
+    available = dialog.screen().availableGeometry()
+    assert dialog.maximumWidth() <= available.width()
+    assert dialog.maximumHeight() <= available.height()
+    assert "Alpha" in dialog.legend_label.text()
+    assert "Beta" in dialog.legend_label.text()
+    dialog.close()
+
+
 def test_map_canvas_repeated_redraw_and_shutdown_without_worker_threads(tmp_path: Path) -> None:
     app = _app()
     pipeline = FakePipeline(tmp_path)
@@ -135,9 +204,14 @@ def test_map_canvas_repeated_redraw_and_shutdown_without_worker_threads(tmp_path
     rows = pipeline.review_rows()
 
     for index in range(30):
-        canvas.draw_pair(pipeline, rows.iloc[index % len(rows)], include_basemap=False)
+        names = canvas.draw_pair(
+            pipeline, rows.iloc[index % len(rows)], include_basemap=False
+        )
+        assert names[0].startswith("Alpha")
+        assert names[1].startswith("Beta")
         app.processEvents()
 
+    assert canvas.axes.get_legend() is None
     assert not hasattr(canvas, "_thread_pool")
     canvas.shutdown()
     app.processEvents()

@@ -547,6 +547,19 @@ class RoadMatchingPipeline:
         )
         if completed:
             self.log(f"Restored {completed} completed manual decision(s) into RAM.")
+        diagnostics = self.manual_review_diagnostics()
+        self.log(
+            "Manual-review barrier verified: "
+            f"selected {diagnostics['selected']} of {diagnostics['total_candidates']} "
+            f"({diagnostics['selected_fraction']:.2%}); allowed integer range "
+            f"{diagnostics['minimum']}..{diagnostics['maximum']} "
+            f"({diagnostics['minimum_fraction']:.0%}.."
+            f"{diagnostics['maximum_fraction']:.0%})."
+        )
+        self.log(
+            "Desktop review presentation order verified: lowest combined probability "
+            "to highest within the unchanged notebook-selected queue."
+        )
         self.log("Analysis pipeline completed.")
         return self
 
@@ -593,25 +606,89 @@ class RoadMatchingPipeline:
     def loaded_session_path(self) -> Path | None:
         return self._loaded_session_path
 
+    @staticmethod
+    def _manual_review_bounds_for_total(
+        total_pairs: int, minimum_fraction: float, maximum_fraction: float
+    ) -> tuple[int, int]:
+        """Mirror notebook #7's integer 2%-to-30% review bounds exactly."""
+        total_pairs = int(total_pairs)
+        if total_pairs < 0:
+            raise ValueError("total_pairs cannot be negative.")
+        if total_pairs == 0:
+            return 0, 0
+
+        minimum = max(1, int(math.ceil(total_pairs * float(minimum_fraction))))
+        maximum = max(1, int(math.floor(total_pairs * float(maximum_fraction))))
+        if minimum > maximum:
+            # Same tiny-dataset exception used by notebook #7.
+            minimum = maximum = 1
+        return minimum, maximum
+
+    def manual_review_diagnostics(self) -> dict[str, int | float | bool]:
+        """Report and strictly validate the notebook's review-count barrier."""
+        frame = self.decision_df
+        total = int(len(frame))
+        selected = int(frame["requires_manual_verification"].astype(bool).sum())
+        minimum, maximum = self._manual_review_bounds_for_total(
+            total,
+            self.config.min_manual_review_fraction,
+            self.config.max_manual_review_fraction,
+        )
+        within_bounds = minimum <= selected <= maximum if total else selected == 0
+        if not within_bounds:
+            raise RuntimeError(
+                "Manual-review count is outside notebook #7's configured barrier: "
+                f"selected={selected}, allowed={minimum}..{maximum}, total={total}."
+            )
+        return {
+            "total_candidates": total,
+            "selected": selected,
+            "minimum": minimum,
+            "maximum": maximum,
+            "selected_fraction": (selected / total) if total else 0.0,
+            "minimum_fraction": float(self.config.min_manual_review_fraction),
+            "maximum_fraction": float(self.config.max_manual_review_fraction),
+            "within_bounds": within_bounds,
+        }
+
     def review_rows(self, include_completed: bool = True) -> pd.DataFrame:
+        """Return notebook-selected rows in desktop review order.
+
+        Notebook #7 still decides *which* pairs are selected. The desktop presents
+        that unchanged selected set from the lowest combined ``probablity`` to the
+        highest, with notebook rank and pair key used only as deterministic ties.
+        """
         frame = self.decision_df
         selected = frame.loc[frame["requires_manual_verification"]].copy()
         if not include_completed:
             selected = selected.loc[selected["manual_decision"].isna()].copy()
-        return selected.sort_values(
-            ["manual_pair_number", "pair_key"], kind="mergesort"
-        ).reset_index(drop=True)
+        selected["_desktop_probability_order"] = pd.to_numeric(
+            selected["probablity"], errors="coerce"
+        )
+        return (
+            selected.sort_values(
+                ["_desktop_probability_order", "manual_review_rank", "pair_key"],
+                ascending=[True, True, True],
+                na_position="last",
+                kind="mergesort",
+            )
+            .drop(columns=["_desktop_probability_order"])
+            .reset_index(drop=True)
+        )
 
     def review_summary(self) -> dict[str, int | float]:
         selected = self.review_rows(include_completed=True)
         completed = int(selected["manual_decision"].notna().sum())
-        total_candidates = int(len(self.decision_df))
+        diagnostics = self.manual_review_diagnostics()
         return {
-            "total_candidates": total_candidates,
-            "selected": int(len(selected)),
+            "total_candidates": int(diagnostics["total_candidates"]),
+            "selected": int(diagnostics["selected"]),
             "completed": completed,
             "remaining": int(len(selected) - completed),
             "threshold": self.optimized_threshold,
+            "minimum_review_count": int(diagnostics["minimum"]),
+            "maximum_review_count": int(diagnostics["maximum"]),
+            "selected_fraction": float(diagnostics["selected_fraction"]),
         }
 
     def pair_features(self, county_1_id: Any, county_2_id: Any) -> pd.Series:

@@ -27,7 +27,7 @@ INNO_SCRIPT = ROOT / "installer" / "RoadMatcher.iss"
 DIST_EXE = ROOT / "dist" / "RoadMatcher" / (
     "RoadMatcher.exe" if os.name == "nt" else "RoadMatcher"
 )
-INSTALLER_OUTPUT = ROOT / "installer_output" / "RoadMatcher-Setup-1.2.0.exe"
+INSTALLER_OUTPUT = ROOT / "installer_output" / "RoadMatcher-Setup-1.3.0.exe"
 
 CONDA_PYTHON_VERSION = os.environ.get(
     "ROAD_MATCHER_PYTHON_VERSION", "3.12"

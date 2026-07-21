@@ -1,5 +1,5 @@
 #define MyAppName "Road Matcher"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Road Matcher Research"
 #define MyAppExeName "RoadMatcher.exe"
 

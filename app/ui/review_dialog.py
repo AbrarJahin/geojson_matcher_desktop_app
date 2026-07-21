@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import logging
 from typing import Any
 
@@ -7,15 +8,20 @@ import pandas as pd
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
-    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
     QVBoxLayout,
+    QWidget,
 )
 
 from app.ui.map_canvas import InteractiveMapCanvas, MapNavigationToolbar
@@ -33,6 +39,13 @@ def _format_probability(value: Any) -> str:
 
 
 class ManualReviewDialog(QDialog):
+    """Full-work-area manual-review window.
+
+    Notebook #7 determines which rows are selected. ``pipeline.review_rows``
+    presents that unchanged selected set from lowest combined probability to
+    highest. Yes/No decisions remain in RAM until the application quit flow.
+    """
+
     all_completed = Signal()
 
     def __init__(self, pipeline: Any, include_basemap: bool = True, parent: Any = None):
@@ -40,34 +53,62 @@ class ManualReviewDialog(QDialog):
         self.pipeline = pipeline
         self._changing_pair = False
         self._closing = False
-        self.rows = pipeline.review_rows(include_completed=True)
+        self._screen_fitted = False
+        self.rows = self._sort_rows_by_combined_probability(
+            pipeline.review_rows(include_completed=True)
+        )
         self.current_index = self._first_pending_index()
         self.setWindowTitle("Manual Road-Pair Verification")
-        self.resize(1250, 900)
+        self.setSizeGripEnabled(False)
+        self.resize(1280, 820)
 
         self.canvas = InteractiveMapCanvas(self)
+        self.canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.toolbar = MapNavigationToolbar(self.canvas, self)
         self.canvas.toolbar = self.toolbar
 
         self.position_label = QLabel()
+        self.position_label.setWordWrap(True)
+        self.position_label.setStyleSheet("font-size: 15px; font-weight: 700;")
+
         self.ids_label = QLabel()
+        self.ids_label.setWordWrap(True)
         self.ids_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
         self.probability_label = QLabel()
+        self.probability_label.setWordWrap(True)
         self.probability_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
+
         self.reason_label = QLabel()
         self.reason_label.setWordWrap(True)
+
         self.saved_label = QLabel()
+        self.saved_label.setWordWrap(True)
         self.saved_label.setStyleSheet("font-weight: 600;")
+
+        self.policy_label = QLabel()
+        self.policy_label.setWordWrap(True)
+        self.policy_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+
+        self.legend_label = QLabel()
+        self.legend_label.setWordWrap(True)
+        self.legend_label.setTextFormat(Qt.TextFormat.RichText)
+        self.legend_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
 
         self.progress = QProgressBar()
         self.progress.setMinimum(0)
         self.progress.setMaximum(max(len(self.rows), 1))
+        self.progress.setFormat("%v of %m reviewed (%p%)")
 
-        self.basemap_checkbox = QCheckBox(
-            "Online street basemap (Qt-native asynchronous loading)"
-        )
+        self.basemap_checkbox = QCheckBox("Online street basemap")
         self.basemap_checkbox.setChecked(include_basemap)
         self.basemap_checkbox.toggled.connect(self._redraw)
 
@@ -78,8 +119,8 @@ class ManualReviewDialog(QDialog):
         self.close_button = QPushButton("Return to Main Window")
         self.quit_button = QPushButton("Save Session && Quit Application")
 
-        self.no_button.setMinimumHeight(42)
-        self.yes_button.setMinimumHeight(42)
+        self.no_button.setMinimumHeight(44)
+        self.yes_button.setMinimumHeight(44)
         self.no_button.setStyleSheet("font-weight: 700;")
         self.yes_button.setStyleSheet("font-weight: 700;")
 
@@ -97,39 +138,132 @@ class ManualReviewDialog(QDialog):
             QShortcut(QKeySequence(Qt.Key.Key_Right), self, activated=self._next),
         ]
 
-        details = QGridLayout()
-        details.addWidget(self.position_label, 0, 0, 1, 2)
-        details.addWidget(self.ids_label, 1, 0, 1, 2)
-        details.addWidget(self.probability_label, 2, 0, 1, 2)
-        details.addWidget(self.reason_label, 3, 0, 1, 2)
-        details.addWidget(self.saved_label, 4, 0, 1, 2)
-        details.addWidget(self.progress, 5, 0, 1, 2)
+        sidebar = self._build_sidebar()
 
-        navigation = QHBoxLayout()
-        navigation.addWidget(self.previous_button)
-        navigation.addWidget(self.next_button)
-        navigation.addStretch(1)
-        navigation.addWidget(self.basemap_checkbox)
+        map_widget = QWidget()
+        map_layout = QVBoxLayout(map_widget)
+        map_layout.setContentsMargins(0, 0, 0, 0)
+        map_layout.setSpacing(4)
+        map_layout.addWidget(self.toolbar)
+        map_layout.addWidget(self.canvas, 1)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(sidebar)
+        splitter.addWidget(map_widget)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([370, 1200])
 
         decisions = QHBoxLayout()
-        decisions.addWidget(self.no_button)
-        decisions.addWidget(self.yes_button)
-        decisions.addWidget(self.close_button)
-        decisions.addWidget(self.quit_button)
+        decisions.setSpacing(10)
+        decisions.addWidget(self.no_button, 2)
+        decisions.addWidget(self.yes_button, 2)
+        decisions.addWidget(self.close_button, 1)
+        decisions.addWidget(self.quit_button, 1)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(details)
-        layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas, 1)
-        layout.addLayout(navigation)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        layout.addWidget(splitter, 1)
         layout.addLayout(decisions)
 
+        # Maximize through the window manager so Windows uses availableGeometry,
+        # which excludes the taskbar/start-menu work area.
+        QTimer.singleShot(0, self._fit_to_available_screen)
+
         if self.rows.empty:
-            QMessageBox.information(self, "Manual review", "No pairs require manual review.")
+            LOGGER.info("No pairs require manual review; continuing to final outputs.")
             self.all_completed.emit()
             QTimer.singleShot(0, self.accept)
             return
         self._show_current()
+
+
+    @staticmethod
+    def _sort_rows_by_combined_probability(rows: pd.DataFrame) -> pd.DataFrame:
+        """Guarantee monotonically increasing desktop review probability."""
+        ordered = rows.copy()
+        ordered["_desktop_probability_order"] = pd.to_numeric(
+            ordered.get("probablity"), errors="coerce"
+        )
+        if "manual_review_rank" not in ordered.columns:
+            ordered["manual_review_rank"] = range(1, len(ordered) + 1)
+        if "pair_key" not in ordered.columns:
+            ordered["pair_key"] = ordered.index.astype(str)
+        return (
+            ordered.sort_values(
+                ["_desktop_probability_order", "manual_review_rank", "pair_key"],
+                ascending=[True, True, True],
+                na_position="last",
+                kind="mergesort",
+            )
+            .drop(columns=["_desktop_probability_order"])
+            .reset_index(drop=True)
+        )
+
+    def _build_sidebar(self) -> QScrollArea:
+        details_group = QGroupBox("Review details")
+        details_layout = QVBoxLayout(details_group)
+        details_layout.addWidget(self.position_label)
+        details_layout.addWidget(self.ids_label)
+        details_layout.addWidget(self.probability_label)
+        details_layout.addWidget(self.reason_label)
+        details_layout.addWidget(self.saved_label)
+        details_layout.addWidget(self.progress)
+
+        policy_group = QGroupBox("Review policy")
+        policy_layout = QVBoxLayout(policy_group)
+        policy_layout.addWidget(self.policy_label)
+
+        legend_group = QGroupBox("Map legend")
+        legend_layout = QVBoxLayout(legend_group)
+        legend_layout.addWidget(self.legend_label)
+
+        navigation_group = QGroupBox("Navigation")
+        navigation_layout = QVBoxLayout(navigation_group)
+        nav_buttons = QHBoxLayout()
+        nav_buttons.addWidget(self.previous_button)
+        nav_buttons.addWidget(self.next_button)
+        navigation_layout.addLayout(nav_buttons)
+        navigation_layout.addWidget(self.basemap_checkbox)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(4, 4, 4, 4)
+        content_layout.setSpacing(8)
+        content_layout.addWidget(details_group)
+        content_layout.addWidget(policy_group)
+        content_layout.addWidget(legend_group)
+        content_layout.addWidget(navigation_group)
+        content_layout.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        scroll.setMinimumWidth(330)
+        scroll.setMaximumWidth(440)
+        return scroll
+
+    def _fit_to_available_screen(self) -> None:
+        if self._closing:
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        self.setMaximumSize(available.size())
+        # Let the native window manager account for frame/title-bar dimensions.
+        self.showMaximized()
+        self._screen_fitted = True
+        LOGGER.info(
+            "Manual-review window maximized to usable screen area: %sx%s at (%s,%s).",
+            available.width(),
+            available.height(),
+            available.x(),
+            available.y(),
+        )
 
     def _first_pending_index(self) -> int:
         if self.rows.empty:
@@ -140,31 +274,71 @@ class ManualReviewDialog(QDialog):
     def _row(self) -> pd.Series:
         return self.rows.iloc[self.current_index]
 
+    def _review_policy_text(self) -> str:
+        try:
+            diagnostics = self.pipeline.manual_review_diagnostics()
+            return (
+                f"Notebook #7 selected <b>{diagnostics['selected']}</b> of "
+                f"<b>{diagnostics['total_candidates']}</b> candidates "
+                f"({diagnostics['selected_fraction']:.2%}).<br>"
+                f"Allowed integer range: <b>{diagnostics['minimum']}</b> to "
+                f"<b>{diagnostics['maximum']}</b> "
+                f"({diagnostics['minimum_fraction']:.0%}–"
+                f"{diagnostics['maximum_fraction']:.0%}).<br><br>"
+                "Display order: <b>lowest combined probability → highest</b> "
+                "within the unchanged notebook-selected queue."
+            )
+        except Exception:
+            LOGGER.exception("Could not build manual-review policy details.")
+            return (
+                "Display order: <b>lowest combined probability → highest</b> "
+                "within the notebook-selected queue."
+            )
+
+    def _legend_html(self, road_name_1: str, road_name_2: str) -> str:
+        county_1 = html.escape(str(self.pipeline.county_1_name))
+        county_2 = html.escape(str(self.pipeline.county_2_name))
+        name_1 = html.escape(str(road_name_1))
+        name_2 = html.escape(str(road_name_2))
+        return (
+            f"<span style='color:#2f5cff;font-size:18px;'>━━━━</span> "
+            f"<b>{county_1}:</b> {name_1}<br>"
+            f"<span style='color:#f0a128;font-size:18px;'>━━━━</span> "
+            f"<b>{county_2}:</b> {name_2}<br>"
+            "<span style='color:#111111;font-size:18px;'>┄┄┄┄</span> Current gap<br>"
+            f"<span style='color:#e74c3c;font-size:18px;'>●</span> {county_1} contact<br>"
+            f"<span style='color:#39a852;font-size:18px;'>●</span> {county_2} contact<br>"
+            "<span style='color:#32cd32;font-size:18px;'>✖</span> Proposed shared midpoint"
+        )
+
     def _show_current(self) -> None:
         if self.rows.empty or self._closing:
             return
         row = self._row()
         completed = int(self.rows["manual_decision"].notna().sum())
         self.position_label.setText(
-            f"Pair {self.current_index + 1} of {len(self.rows)} — "
-            f"completed {completed}, remaining {len(self.rows) - completed}"
+            f"Pair {self.current_index + 1} of {len(self.rows)}<br>"
+            f"Completed {completed}; remaining {len(self.rows) - completed}"
         )
         self.ids_label.setText(
-            f"{self.pipeline.county_1_name} road ID: {row['county_1_id']}    |    "
-            f"{self.pipeline.county_2_name} road ID: {row['county_2_id']}"
+            f"<b>{html.escape(str(self.pipeline.county_1_name))} road ID:</b> "
+            f"{html.escape(str(row['county_1_id']))}<br>"
+            f"<b>{html.escape(str(self.pipeline.county_2_name))} road ID:</b> "
+            f"{html.escape(str(row['county_2_id']))}"
         )
         self.probability_label.setText(
-            "Geometric: "
+            "<b>Geometric:</b> "
             + _format_probability(row.get("geometric_valid_pair_probability"))
-            + "    Textual: "
+            + "<br><b>Textual:</b> "
             + _format_probability(row.get("textual_valid_pair_probability"))
-            + "    Combined: "
+            + "<br><b>Combined:</b> "
             + _format_probability(row.get("probablity"))
-            + "    Threshold: "
+            + "<br><b>Threshold:</b> "
             + _format_probability(self.pipeline.optimized_threshold)
         )
         self.reason_label.setText(
-            f"Selection reason: {row.get('manual_review_selected_from', 'manual review')}"
+            "<b>Selection reason:</b><br>"
+            + html.escape(str(row.get("manual_review_selected_from", "manual review")))
         )
         current_decision = row.get("manual_decision")
         self.saved_label.setText(
@@ -172,12 +346,14 @@ class ManualReviewDialog(QDialog):
             if pd.isna(current_decision)
             else f"Decision in memory: {str(current_decision).upper()}"
         )
+        self.policy_label.setText(self._review_policy_text())
         self.progress.setValue(completed)
         self.previous_button.setEnabled(self.current_index > 0)
         self.next_button.setEnabled(self.current_index < len(self.rows) - 1)
-        self.canvas.draw_pair(
+        road_name_1, road_name_2 = self.canvas.draw_pair(
             self.pipeline, row, include_basemap=self.basemap_checkbox.isChecked()
         )
+        self.legend_label.setText(self._legend_html(road_name_1, road_name_2))
 
     def _redraw(self) -> None:
         if not self.rows.empty and not self._changing_pair and not self._closing:
@@ -247,16 +423,14 @@ class ManualReviewDialog(QDialog):
             self.rows["manual_decision"].isna()
         ].tolist()
         if not pending_positions:
-            self._changing_pair = False
-            self._set_transition_controls_enabled(True)
-            self._show_current()
-            QMessageBox.information(
-                self,
-                "Manual review complete",
-                "All selected road pairs have been reviewed. "
-                "Final outputs will now be created; the review-session CSV "
-                "is written only when the application quits.",
+            LOGGER.info(
+                "Manual review completed in RAM. Closing review and starting "
+                "automatic final-output creation."
             )
+            self.saved_label.setText(
+                "All selected pairs reviewed. Creating final outputs automatically..."
+            )
+            self._changing_pair = False
             self.all_completed.emit()
             self.accept()
             return
@@ -269,7 +443,7 @@ class ManualReviewDialog(QDialog):
         QTimer.singleShot(0, self._finish_pair_transition)
 
     def _quit_application(self) -> None:
-        """Close review, then delegate the only durable save to MainWindow."""
+        """Close review, then delegate the only durable session save to MainWindow."""
         parent = self.parentWidget()
         self._finish_without_saving(QDialog.DialogCode.Accepted)
         if parent is not None:
@@ -281,9 +455,6 @@ class ManualReviewDialog(QDialog):
             return
         self._closing = True
         self._set_transition_controls_enabled(False)
-        self.saved_label.setText(
-            "Review window closing. Decisions remain in RAM until application quit."
-        )
         try:
             self.canvas.shutdown()
         except Exception:

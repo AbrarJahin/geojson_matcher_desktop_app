@@ -2,6 +2,29 @@
 
 Road Matcher Desktop runs the retained analytical cells from notebook #7 inside a local PySide6 application. Candidate generation, feature engineering, the geometric model, textual model, Empirical-Bayes fusion, threshold selection, the 2%–30% manual-review plan, conflict handling, and final road-connection/output code remain in `app/core/legacy_program.py`.
 
+
+## Manual-review selection and display order
+
+Notebook #7 remains the authority for **which pairs are selected**. It calculates
+the allowed integer review-count range as:
+
+```text
+minimum = ceil(total candidate pairs × 2%)
+maximum = floor(total candidate pairs × 30%)
+```
+
+For tiny datasets where integer rounding makes both constraints impossible, the
+notebook reviews one row. The notebook then selects rows by uncertainty and
+geometric/textual model disagreement; it does **not** select rows simply because
+they have the lowest raw combined probability.
+
+The desktop application preserves that selected set exactly, validates the
+2%-to-30% barrier a second time, and presents the selected rows in the requested
+visual order: **lowest combined `probablity` first, then monotonically higher
+combined probabilities**. Notebook rank and pair key are used only to make ties
+deterministic. The selected count, selected percentage, and allowed integer range
+are shown in the application and written to the console log.
+
 ## Review-state behavior
 
 Manual Yes/No actions now follow a deliberate in-memory workflow:
@@ -79,10 +102,10 @@ conda run --prefix <project>/.venv ...
 3. Confirm the road ID column, projected CRS, candidate distance, and batch size.
 4. Click **Analyze GeoJSON Files** the first time. On later launches, valid remembered paths are analyzed automatically.
 5. If a compatible state CSV exists, its decisions are restored into RAM. Otherwise review begins with no completed decisions.
-6. Review selected pairs with the Yes/No buttons or the **Y**/**N** keyboard shortcuts.
+6. Review selected pairs with the Yes/No buttons or the **Y**/**N** keyboard shortcuts. The desktop queue starts with the lowest combined probability in the notebook-selected set and proceeds upward.
 7. **Return to Main Window** closes only the review window; decisions continue to exist in RAM.
 8. Press **Save Session & Quit Application** (or close the main window) to atomically replace the old saved session with the current RAM state.
-9. When all selected rows are complete, final output creation begins from the in-memory decisions. The review-session CSV is still updated only at application quit.
+9. When the last selected row is answered, the review window closes and final GeoJSON/audit creation starts automatically from the in-memory decisions. No separate final-output button is required. The review-session CSV is still updated only at application quit.
 
 The two input files are alphabetically ordered before being assigned as County/File 1 and County/File 2, matching notebook #7.
 
@@ -113,6 +136,10 @@ make verify
 The suite checks:
 
 - compilation of all retained notebook cells;
+- exact 2%-to-30% integer-bound calculations and strict selected-count validation;
+- lowest-to-highest combined-probability desktop review ordering;
+- usable-screen review-window sizing and left-side details/legend layout;
+- automatic finalization after the last manual decision;
 - configuration validation;
 - in-memory-only button decisions;
 - atomic session replacement and deletion of older recovery files;
@@ -139,7 +166,7 @@ dist\RoadMatcher\RoadMatcher.exe
 The installer is written to:
 
 ```text
-installer_output\RoadMatcher-Setup-1.2.0.exe
+installer_output\RoadMatcher-Setup-1.3.0.exe
 ```
 
 The one-folder build is intentional because Qt and the scientific/GIS dependencies are more reliable in that form.

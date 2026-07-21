@@ -279,7 +279,7 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         }
         self._tile_batches[token] = batch
 
-        user_agent = b"RoadMatcherDesktop/1.1 (manual road-pair research review)"
+        user_agent = b"RoadMatcherDesktop/1.3.0 (manual road-pair research review)"
         for tile_y in range(y_min, y_max + 1):
             for tile_x in range(x_min, x_max + 1):
                 url = QUrl(
@@ -422,9 +422,9 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
 
     def draw_pair(
         self, pipeline: Any, plan_row: Any, include_basemap: bool = True
-    ) -> None:
+    ) -> tuple[str, str]:
         if self._shutting_down:
-            return
+            return "", ""
         self._draw_token += 1
         token = self._draw_token
         self._cancel_tile_requests()
@@ -490,7 +490,6 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             color="blue",
             linewidth=4.0,
             alpha=0.50,
-            label=f"{pipeline.county_1_name}: {name_1}",
             zorder=5,
         )
         self._plot_geometry(
@@ -499,7 +498,6 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             color="orange",
             linewidth=4.0,
             alpha=0.50,
-            label=f"{pipeline.county_2_name}: {name_2}",
             zorder=5,
         )
         ax.plot(
@@ -509,7 +507,6 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             linewidth=1.7,
             linestyle="--",
             alpha=0.90,
-            label="Current gap",
             zorder=6,
         )
         ax.scatter(
@@ -520,7 +517,6 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             alpha=0.50,
             edgecolor="black",
             linewidth=0.8,
-            label=f"{pipeline.county_1_name} contact",
             zorder=7,
         )
         ax.scatter(
@@ -531,7 +527,6 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             alpha=0.50,
             edgecolor="black",
             linewidth=0.8,
-            label=f"{pipeline.county_2_name} contact",
             zorder=7,
         )
         ax.scatter(
@@ -542,15 +537,10 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             color="limegreen",
             edgecolor="black",
             linewidth=1.0,
-            label="Proposed shared midpoint",
             zorder=8,
         )
 
-        ax.set_title(
-            f"Possible connected roads — {pipeline.county_1_name} {plan_row['county_1_id']} / "
-            f"{pipeline.county_2_name} {plan_row['county_2_id']}"
-        )
-        ax.legend(loc="upper right", fontsize=9, markerscale=1.1)
+        ax.set_title("Possible connected roads")
         ax.grid(True, alpha=0.50)
         ax.set_xlabel("Web Mercator X coordinate (meters)")
         ax.set_ylabel("Web Mercator Y coordinate (meters)")
@@ -567,6 +557,7 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self.draw_idle()
         if include_basemap:
             self._schedule_basemap(token, web_view, pipeline)
+        return name_1, name_2
 
 
 class MapNavigationToolbar(NavigationToolbar2QT):
