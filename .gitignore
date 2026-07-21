@@ -17,4 +17,3 @@ htmlcov/
 # Local OS/editor files.
 .DS_Store
 Thumbs.db
-.vscode/settings.json

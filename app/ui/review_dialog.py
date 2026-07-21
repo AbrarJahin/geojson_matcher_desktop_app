@@ -253,8 +253,8 @@ class ManualReviewDialog(QDialog):
             QMessageBox.information(
                 self,
                 "Manual review complete",
-                "All selected road pairs have been reviewed. The decisions remain "
-                "in RAM. Final outputs will now be created; the review-session CSV "
+                "All selected road pairs have been reviewed. "
+                "Final outputs will now be created; the review-session CSV "
                 "is written only when the application quits.",
             )
             self.all_completed.emit()
