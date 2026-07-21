@@ -1,14 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
-# Scientific/GIS packages carry CRS databases, projection grids, provider metadata,
-# and native libraries that must remain beside the executable.
+# Scientific/GIS packages carry CRS databases, projection grids, and native
+# libraries that must remain beside the executable.
 datas = []
-for package in ["geopandas", "pyproj", "rasterio", "contextily", "xyzservices", "matplotlib"]:
+for package in ["geopandas", "pyproj", "matplotlib"]:
     datas += collect_data_files(package, include_py_files=False)
 
 binaries = []
-for package in ["pyproj", "pyogrio", "rasterio", "shapely"]:
+for package in ["pyproj", "pyogrio", "shapely"]:
     binaries += collect_dynamic_libs(package)
 
 hiddenimports = [
@@ -17,7 +17,7 @@ hiddenimports = [
     "sklearn.decomposition._pca",
     "sklearn.preprocessing._data",
     "matplotlib.backends.backend_qtagg",
-    "contextily.tile",
+    "PySide6.QtNetwork",
 ]
 
 a = Analysis(
@@ -38,6 +38,9 @@ a = Analysis(
         "PyQt5",
         "PyQt6",
         "pytest",
+        "contextily",
+        "rasterio",
+        "xyzservices",
     ],
     noarchive=False,
     optimize=1,

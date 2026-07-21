@@ -27,7 +27,7 @@ INNO_SCRIPT = ROOT / "installer" / "RoadMatcher.iss"
 DIST_EXE = ROOT / "dist" / "RoadMatcher" / (
     "RoadMatcher.exe" if os.name == "nt" else "RoadMatcher"
 )
-INSTALLER_OUTPUT = ROOT / "installer_output" / "RoadMatcher-Setup-1.0.0.exe"
+INSTALLER_OUTPUT = ROOT / "installer_output" / "RoadMatcher-Setup-1.2.0.exe"
 
 CONDA_PYTHON_VERSION = os.environ.get(
     "ROAD_MATCHER_PYTHON_VERSION", "3.12"
@@ -339,9 +339,68 @@ def require_runtime_python() -> None:
         )
 
 
+def _tail_text_file(path: Path, line_count: int = 80) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[-line_count:])
+
+
 def run_app() -> None:
     require_runtime_python()
-    run_command([sys.executable, "main.py"])
+    command = [sys.executable, "-X", "faulthandler", "main.py"]
+    print("\n> {0}".format(_display_command(command)), flush=True)
+
+    local_app_data = os.environ.get("LOCALAPPDATA", str(Path.home()))
+    data_dir = Path(local_app_data) / "RoadMatcher"
+    application_log = data_dir / "logs" / "road-matcher.log"
+    native_log = data_dir / "native-crash.log"
+    print("Console diagnostics are enabled.", flush=True)
+    print("Application log: {0}".format(application_log), flush=True)
+    print("Native crash log: {0}".format(native_log), flush=True)
+
+    child_env = os.environ.copy()
+    child_env["PYTHONUNBUFFERED"] = "1"
+    child_env["PYTHONFAULTHANDLER"] = "1"
+    child_env["QT_FORCE_STDERR_LOGGING"] = "1"
+    result = subprocess.run(
+        command,
+        cwd=str(ROOT),
+        env=child_env,
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+
+    unsigned_code = result.returncode & 0xFFFFFFFF
+    windows_codes = {
+        0xC0000005: "access violation",
+        0xC0000409: "stack buffer overrun / fast-fail",
+        0xC0000374: "heap corruption",
+        0xC000001D: "illegal instruction",
+    }
+    description = windows_codes.get(unsigned_code, "unexpected process termination")
+    print(
+        "\nRoad Matcher exited abnormally: {0} (signed {1}, unsigned 0x{2:08X})."
+        .format(description, result.returncode, unsigned_code),
+        file=sys.stderr,
+        flush=True,
+    )
+
+    application_tail = _tail_text_file(application_log)
+    if application_tail:
+        print("\n--- Last application log lines ---", file=sys.stderr)
+        print(application_tail, file=sys.stderr)
+    native_tail = _tail_text_file(native_log)
+    if native_tail:
+        print("\n--- Last native-fault log lines ---", file=sys.stderr)
+        print(native_tail, file=sys.stderr)
+
+    raise RuntimeError(
+        "Road Matcher terminated with code 0x{0:08X} ({1}). Full logs: {2} and {3}."
+        .format(unsigned_code, description, application_log, native_log)
+    )
 
 
 def test() -> None:

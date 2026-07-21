@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QThread, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QSettings, QThread, QTimer, QUrl
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -29,6 +30,8 @@ from app.core.pipeline import FinalizationResult, PipelineConfig, RoadMatchingPi
 from app.ui.review_dialog import ManualReviewDialog
 from app.workers.tasks import AnalysisWorker, FinalizationWorker
 
+LOGGER = logging.getLogger(__name__)
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -38,10 +41,13 @@ class MainWindow(QMainWindow):
         self.pipeline: RoadMatchingPipeline | None = None
         self._thread: QThread | None = None
         self._worker: Any = None
+        self._settings = QSettings()
 
         self.file_1_edit = QLineEdit()
         self.file_2_edit = QLineEdit()
-        self.output_edit = QLineEdit(str(Path.home() / "Documents" / "RoadMatcherOutputs"))
+        self.output_edit = QLineEdit(
+            str(Path.home() / "Documents" / "RoadMatcherOutputs")
+        )
         self.road_id_edit = QLineEdit("OBJECTID")
         self.target_crs_edit = QLineEdit("EPSG:26916")
         self.buffer_spin = QDoubleSpinBox()
@@ -52,13 +58,16 @@ class MainWindow(QMainWindow):
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 1000)
         self.batch_spin.setValue(30)
-        self.basemap_checkbox = QCheckBox("Show online street basemap during manual review (loads asynchronously)")
-        self.basemap_checkbox.setChecked(True)
+        self.basemap_checkbox = QCheckBox(
+            "Show online street basemap during manual review"
+        )
+        self.basemap_checkbox.setChecked(False)
 
         self.analyze_button = QPushButton("Analyze GeoJSON Files")
         self.review_button = QPushButton("Open / Resume Manual Review")
         self.finalize_button = QPushButton("Create Final Outputs")
         self.open_output_button = QPushButton("Open Output Folder")
+        self.quit_button = QPushButton("Save Session && Quit Application")
         self.review_button.setEnabled(False)
         self.finalize_button.setEnabled(False)
 
@@ -79,6 +88,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.review_button)
         actions.addWidget(self.finalize_button)
         actions.addWidget(self.open_output_button)
+        actions.addWidget(self.quit_button)
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -96,6 +106,13 @@ class MainWindow(QMainWindow):
         self.review_button.clicked.connect(self._open_review)
         self.finalize_button.clicked.connect(self._start_finalization)
         self.open_output_button.clicked.connect(self._open_output_folder)
+        self.quit_button.clicked.connect(self.close)
+
+        self._restore_settings()
+        # Resume the last valid project automatically. Analysis must run again
+        # to reconstruct notebook state before compatible saved decisions can
+        # be merged into the in-memory review queue.
+        QTimer.singleShot(350, self._auto_start_last_project)
 
     def _build_input_group(self) -> QGroupBox:
         group = QGroupBox("Local files")
@@ -127,6 +144,80 @@ class MainWindow(QMainWindow):
         form.addRow("Map", self.basemap_checkbox)
         return group
 
+    def _restore_settings(self) -> None:
+        self.file_1_edit.setText(str(self._settings.value("paths/file_1", "")))
+        self.file_2_edit.setText(str(self._settings.value("paths/file_2", "")))
+        stored_output = self._settings.value("paths/output", "")
+        if stored_output:
+            self.output_edit.setText(str(stored_output))
+        self.road_id_edit.setText(
+            str(self._settings.value("pipeline/road_id", "OBJECTID"))
+        )
+        self.target_crs_edit.setText(
+            str(self._settings.value("pipeline/target_crs", "EPSG:26916"))
+        )
+        try:
+            self.buffer_spin.setValue(
+                float(self._settings.value("pipeline/buffer_m", 50.0))
+            )
+            self.batch_spin.setValue(
+                int(self._settings.value("pipeline/batch_size", 30))
+            )
+        except (TypeError, ValueError):
+            LOGGER.exception("Stored GUI settings were invalid; defaults were retained.")
+        basemap_value = str(
+            self._settings.value("map/online_basemap", "false")
+        ).lower()
+        self.basemap_checkbox.setChecked(basemap_value in {"1", "true", "yes"})
+
+    def _auto_start_last_project(self) -> None:
+        """Automatically run the last valid project after application startup."""
+        if self._thread is not None or self.pipeline is not None:
+            return
+        try:
+            config = self._config().normalized()
+            config.validate()
+        except Exception:
+            LOGGER.info(
+                "Automatic startup skipped because the remembered input/output paths "
+                "are not yet valid."
+            )
+            return
+
+        state_dir = config.output_dir / ".road_matcher_state"
+        has_saved_state = state_dir.is_dir() and any(
+            state_dir.glob("*_manual_review_progress*.csv")
+        )
+        if has_saved_state:
+            LOGGER.info(
+                "Saved review state detected in %s; automatically rebuilding the "
+                "pipeline and resuming the compatible session.",
+                state_dir,
+            )
+            self.status_label.setText(
+                "Saved review state detected; automatically resuming the last project..."
+            )
+        else:
+            LOGGER.info(
+                "No saved review state detected for the remembered valid project; "
+                "automatically starting from the beginning."
+            )
+            self.status_label.setText(
+                "No saved review state found; automatically starting the last project..."
+            )
+        self._start_analysis()
+
+    def _save_settings(self) -> None:
+        self._settings.setValue("paths/file_1", self.file_1_edit.text().strip())
+        self._settings.setValue("paths/file_2", self.file_2_edit.text().strip())
+        self._settings.setValue("paths/output", self.output_edit.text().strip())
+        self._settings.setValue("pipeline/road_id", self.road_id_edit.text().strip())
+        self._settings.setValue("pipeline/target_crs", self.target_crs_edit.text().strip())
+        self._settings.setValue("pipeline/buffer_m", self.buffer_spin.value())
+        self._settings.setValue("pipeline/batch_size", self.batch_spin.value())
+        self._settings.setValue("map/online_basemap", self.basemap_checkbox.isChecked())
+        self._settings.sync()
+
     def _select_file(self, target: QLineEdit) -> None:
         filename, _ = QFileDialog.getOpenFileName(
             self,
@@ -139,7 +230,9 @@ class MainWindow(QMainWindow):
 
     def _select_output_dir(self) -> None:
         directory = QFileDialog.getExistingDirectory(
-            self, "Select output folder", self.output_edit.text() or str(Path.home())
+            self,
+            "Select output folder",
+            self.output_edit.text() or str(Path.home()),
         )
         if directory:
             self.output_edit.setText(directory)
@@ -159,6 +252,7 @@ class MainWindow(QMainWindow):
         self.analyze_button.setEnabled(not busy)
         self.review_button.setEnabled(not busy and self.pipeline is not None)
         self.finalize_button.setEnabled(not busy and self.pipeline is not None)
+        self.quit_button.setEnabled(not busy)
         self.progress.setRange(0, 0 if busy else 1)
         if not busy:
             self.progress.setValue(1)
@@ -168,17 +262,23 @@ class MainWindow(QMainWindow):
         self.log_edit.append(message.replace("\n", "<br>"))
 
     def _start_analysis(self) -> None:
+        if self._thread is not None and self._thread.isRunning():
+            LOGGER.warning("Analysis request ignored because a background task is active.")
+            return
         try:
             config = self._config().normalized()
             config.validate()
         except Exception as exc:
+            LOGGER.exception("Invalid pipeline configuration.")
             QMessageBox.critical(self, "Invalid configuration", str(exc))
             return
 
+        self._save_settings()
         self.pipeline = None
         self.summary_label.clear()
         self.log_edit.clear()
         self._set_busy(True, "Analyzing road files...")
+        LOGGER.info("Starting analysis for %s and %s", config.county_file_1, config.county_file_2)
 
         thread = QThread(self)
         worker = AnalysisWorker(config)
@@ -191,6 +291,7 @@ class MainWindow(QMainWindow):
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._background_thread_finished)
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
@@ -200,13 +301,19 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Analysis stage {position} of {total}: {filename}")
 
     def _analysis_completed(self, pipeline: RoadMatchingPipeline) -> None:
+        pipeline.set_logger(self._append_log)
         self.pipeline = pipeline
         summary = pipeline.review_summary()
+        session_text = (
+            f"Loaded session: {pipeline.loaded_session_path}"
+            if pipeline.loaded_session_path is not None
+            else "No saved session was loaded"
+        )
         self.summary_label.setText(
             f"Candidate pairs: {summary['total_candidates']} | "
             f"Manual review selected: {summary['selected']} | "
             f"Completed: {summary['completed']} | Remaining: {summary['remaining']} | "
-            f"Optimized threshold: {summary['threshold']:.6f}"
+            f"Optimized threshold: {summary['threshold']:.6f}<br>{session_text}"
         )
         self._set_busy(False, "Analysis complete.")
         self.review_button.setEnabled(summary["selected"] > 0)
@@ -227,9 +334,11 @@ class MainWindow(QMainWindow):
         dialog.exec()
         summary = self.pipeline.review_summary()
         self.summary_label.setText(
-            f"Candidate pairs: {summary['total_candidates']} | Manual review selected: {summary['selected']} | "
+            f"Candidate pairs: {summary['total_candidates']} | "
+            f"Manual review selected: {summary['selected']} | "
             f"Completed: {summary['completed']} | Remaining: {summary['remaining']} | "
-            f"Optimized threshold: {summary['threshold']:.6f}"
+            f"Optimized threshold: {summary['threshold']:.6f}<br>"
+            f"Session file: {self.pipeline.session_path}"
         )
         self.finalize_button.setEnabled(summary["remaining"] == 0)
         if summary["remaining"] == 0:
@@ -241,10 +350,13 @@ class MainWindow(QMainWindow):
         summary = self.pipeline.review_summary()
         if summary["remaining"] > 0:
             QMessageBox.warning(
-                self, "Manual review incomplete", f"{summary['remaining']} pairs remain unanswered."
+                self,
+                "Manual review incomplete",
+                f"{summary['remaining']} pairs remain unanswered.",
             )
             return
         self._set_busy(True, "Creating final GeoJSON files and audit CSVs...")
+        LOGGER.info("Starting final output creation.")
         thread = QThread(self)
         worker = FinalizationWorker(self.pipeline)
         worker.moveToThread(thread)
@@ -255,12 +367,14 @@ class MainWindow(QMainWindow):
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._background_thread_finished)
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
         thread.start()
 
     def _finalization_completed(self, result: FinalizationResult) -> None:
+        LOGGER.info("Final outputs created successfully: %s", result)
         self._set_busy(False, "Final outputs created successfully.")
         self.summary_label.setText(
             f"Accepted pairs: {result.accepted_pairs} | Rejected pairs: {result.rejected_pairs}<br>"
@@ -271,17 +385,61 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Road matching complete",
-            "The two updated GeoJSON files and audit CSV files were created in the selected output folder.",
+            "The two updated GeoJSON files and audit CSV files were created in "
+            "the selected output folder.",
         )
 
     def _task_failed(self, traceback_text: str) -> None:
+        LOGGER.error("Background operation failed:\n%s", traceback_text)
         self._append_log(traceback_text)
         self._set_busy(False, "Operation failed. Review the processing log.")
         QMessageBox.critical(
             self,
             "Operation failed",
-            "The operation failed. The complete traceback is available in the processing log.",
+            "The operation failed. The complete traceback is available in the "
+            "processing log and console.",
         )
+
+    def _background_thread_finished(self) -> None:
+        LOGGER.info("Background Qt thread finished.")
+        self._worker = None
+        self._thread = None
+
+    def _save_session_before_exit(self) -> bool:
+        if self.pipeline is None:
+            return True
+        try:
+            path = self.pipeline.save_session(force=True, reason="application quit")
+            if path is not None:
+                LOGGER.info("Session saved before application exit: %s", path)
+            return True
+        except Exception as exc:
+            LOGGER.exception("Could not save the session before application exit.")
+            QMessageBox.critical(
+                self,
+                "Could not save progress",
+                "The application will remain open because the current session could "
+                f"not be saved. Close the CSV in Excel and try Quit again.\n\n{exc}",
+            )
+            return False
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        thread = self._thread
+        if thread is not None and thread.isRunning():
+            QMessageBox.information(
+                self,
+                "Operation still running",
+                "Please wait for the current analysis or finalization operation to "
+                "finish before closing the application.",
+            )
+            event.ignore()
+            return
+        if not self._save_session_before_exit():
+            event.ignore()
+            return
+        self._save_settings()
+        LOGGER.info("Main window accepted the application close event.")
+        event.accept()
 
     def _open_output_folder(self) -> None:
         directory = Path(self.output_edit.text().strip()).expanduser()

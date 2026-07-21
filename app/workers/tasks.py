@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import traceback
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from app.core.pipeline import PipelineConfig, RoadMatchingPipeline
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AnalysisWorker(QObject):
@@ -19,12 +22,19 @@ class AnalysisWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        LOGGER.info("Analysis worker started.")
         try:
             pipeline = RoadMatchingPipeline(self.config, logger=self.log.emit)
             pipeline.run_analysis(stage_callback=self.stage.emit)
+            # The worker is deleted after its thread exits. Do not return a
+            # pipeline that retains a bound Signal.emit method from this worker.
+            pipeline.set_logger(None)
             self.completed.emit(pipeline)
+            LOGGER.info("Analysis worker completed.")
         except Exception:
-            self.failed.emit(traceback.format_exc())
+            traceback_text = traceback.format_exc()
+            LOGGER.error("Analysis worker failed:\n%s", traceback_text)
+            self.failed.emit(traceback_text)
 
 
 class FinalizationWorker(QObject):
@@ -38,13 +48,17 @@ class FinalizationWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        LOGGER.info("Finalization worker started.")
         try:
             previous_logger = self.pipeline._logger
-            self.pipeline._logger = self.log.emit
+            self.pipeline.set_logger(self.log.emit)
             try:
                 result = self.pipeline.finalize()
             finally:
-                self.pipeline._logger = previous_logger
+                self.pipeline.set_logger(previous_logger)
             self.completed.emit(result)
+            LOGGER.info("Finalization worker completed.")
         except Exception:
-            self.failed.emit(traceback.format_exc())
+            traceback_text = traceback.format_exc()
+            LOGGER.error("Finalization worker failed:\n%s", traceback_text)
+            self.failed.emit(traceback_text)

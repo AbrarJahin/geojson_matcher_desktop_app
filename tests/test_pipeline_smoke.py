@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
+
 from app.core.pipeline import PipelineConfig, RoadMatchingPipeline
 
 
@@ -36,7 +38,8 @@ def _write_roads(path: Path, start_id: int, y_offset: float) -> None:
             }
         )
     path.write_text(
-        json.dumps({"type": "FeatureCollection", "features": features}), encoding="utf-8"
+        json.dumps({"type": "FeatureCollection", "features": features}),
+        encoding="utf-8",
     )
 
 
@@ -54,47 +57,32 @@ def test_pipeline_runs_on_synthetic_geojson(tmp_path: Path) -> None:
     assert summary["selected"] >= 1
     assert 0.0 <= summary["threshold"] <= 1.0
 
+    session_path = pipeline.session_path
+    assert not session_path.exists()
+
     for _, row in pipeline.review_rows().iterrows():
         pipeline.record_manual_decision(str(row["pair_key"]), "no")
+        # The core requirement: each click changes only RAM.
+        assert not session_path.exists()
 
-    result = pipeline.finalize()
+    saved = pipeline.save_session(force=True, reason="test quit")
+    assert saved == session_path
+    assert session_path.exists()
+    progress = pd.read_csv(session_path)
+    assert progress["manual_decision"].dropna().eq("no").all()
+
+    resumed = RoadMatchingPipeline(
+        PipelineConfig(first, second, tmp_path / "output", buffer_distance_meters=80.0)
+    )
+    resumed.run_analysis()
+    resumed_summary = resumed.review_summary()
+    assert resumed.loaded_session_path == session_path
+    assert resumed_summary["completed"] == resumed_summary["selected"]
+    assert resumed_summary["remaining"] == 0
+
+    result = resumed.finalize()
     assert result.county_1_output.exists()
     assert result.county_2_output.exists()
     assert result.final_decisions_csv.exists()
     assert result.decision_audit_csv.exists()
     assert result.connection_audit_csv.exists()
-
-
-def test_manual_decision_uses_recovery_file_when_primary_is_locked(tmp_path: Path, monkeypatch) -> None:
-    first = tmp_path / "Alpha.geojson"
-    second = tmp_path / "Beta.geojson"
-    _write_roads(first, 1, 0.0)
-    _write_roads(second, 101, 0.00005)
-    pipeline = RoadMatchingPipeline(
-        PipelineConfig(first, second, tmp_path / "output", buffer_distance_meters=80.0)
-    )
-    pipeline.run_analysis()
-    row = pipeline.review_rows().iloc[0]
-
-    import app.core.pipeline as pipeline_module
-
-    real_replace = pipeline_module.os.replace
-    primary = Path(pipeline.namespace["MANUAL_PROGRESS_CSV"])
-    attempts = {"count": 0}
-
-    def simulated_replace(source, destination):
-        destination_path = Path(destination)
-        if destination_path == primary:
-            attempts["count"] += 1
-            raise PermissionError("simulated Windows lock")
-        return real_replace(source, destination)
-
-    monkeypatch.setattr(pipeline_module.os, "replace", simulated_replace)
-    pipeline.record_manual_decision(str(row["pair_key"]), "yes")
-
-    recovery = Path(pipeline.namespace["MANUAL_PROGRESS_CSV"])
-    assert attempts["count"] >= 1
-    assert recovery != primary
-    assert recovery.exists()
-    assert "recovery" in recovery.name
-    assert pipeline.review_summary()["completed"] == 1
