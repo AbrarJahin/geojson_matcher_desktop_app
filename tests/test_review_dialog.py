@@ -226,3 +226,72 @@ def test_online_tile_requests_can_be_aborted_during_close(tmp_path: Path) -> Non
     app.processEvents()
     assert canvas._shutting_down is True
     assert canvas._reply_context == {}
+
+def test_online_basemap_refresh_is_throttled_and_uses_latest_view(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import time
+
+    from PySide6.QtTest import QTest
+    import app.ui.map_canvas as map_canvas_module
+
+    app = _app()
+    pipeline = FakePipeline(tmp_path)
+
+    canvas = InteractiveMapCanvas()
+    canvas.resize(1000, 700)
+    canvas._current_pipeline = pipeline
+    canvas._basemap_enabled = True
+    canvas._connect_view_limit_callbacks()
+
+    # Use 100 ms in the test instead of waiting five seconds.
+    monkeypatch.setattr(
+        map_canvas_module,
+        "BASEMAP_VIEW_REFRESH_INTERVAL_MS",
+        100,
+    )
+
+    canvas._last_basemap_refresh_at = time.monotonic()
+
+    scheduled: list[
+        tuple[float, float, float, float]
+    ] = []
+
+    def fake_schedule(
+        token,
+        bounds,
+        active_pipeline,
+    ) -> None:
+        assert active_pipeline is pipeline
+        scheduled.append(bounds)
+        canvas._last_basemap_refresh_at = time.monotonic()
+
+    monkeypatch.setattr(
+        canvas,
+        "_schedule_basemap",
+        fake_schedule,
+    )
+
+    # Simulate several rapid viewport changes.
+    for offset in range(5):
+        canvas.axes.set_xlim(offset, 100 + offset)
+        canvas.axes.set_ylim(
+            offset * 2,
+            100 + offset * 2,
+        )
+        app.processEvents()
+        QTest.qWait(10)
+
+    # No immediate duplicate requests.
+    assert scheduled == []
+
+    QTest.qWait(120)
+    app.processEvents()
+
+    # Only the latest viewport was requested.
+    assert scheduled == [
+        (4.0, 8.0, 104.0, 108.0)
+    ]
+
+    canvas.shutdown()

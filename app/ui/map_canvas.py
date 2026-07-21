@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import OrderedDict
 from typing import Any
 
@@ -22,7 +23,7 @@ WEB_MERCATOR_HALF_WORLD = 20037508.342789244
 WEB_MERCATOR_WORLD = WEB_MERCATOR_HALF_WORLD * 2.0
 TILE_SIZE = 256
 MAX_TILE_REQUESTS = 16
-
+BASEMAP_VIEW_REFRESH_INTERVAL_MS = 5_000
 
 class InteractiveMapCanvas(FigureCanvasQTAgg):
     """Matplotlib road review map with non-blocking Qt-native tile requests.
@@ -47,6 +48,27 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._shutting_down = False
         self._transformers: dict[str, Transformer] = {}
 
+        # Vector roads respond immediately. Online basemap refreshes are
+        # throttled independently and use the newest visible viewport.
+        self._current_pipeline: Any | None = None
+        self._basemap_enabled = False
+        self._pending_basemap_bounds: (
+            tuple[float, float, float, float] | None
+        ) = None
+        self._last_basemap_refresh_at = 0.0
+        self._suspend_view_refresh = False
+
+        # Keep references to the currently displayed basemap artists so that
+        # a refreshed basemap replaces the previous one instead of stacking.
+        self._basemap_image_artist: Any | None = None
+        self._basemap_attribution_artist: Any | None = None
+
+        self._basemap_refresh_timer = QTimer(self)
+        self._basemap_refresh_timer.setSingleShot(True)
+        self._basemap_refresh_timer.timeout.connect(
+            self._run_pending_basemap_refresh
+        )
+
         self._network = QNetworkAccessManager(self)
         self._network.finished.connect(self._network_reply_finished)
         self._reply_context: dict[QNetworkReply, dict[str, Any]] = {}
@@ -63,6 +85,141 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
     def _toolbar_is_active(self) -> bool:
         toolbar = getattr(self, "toolbar", None)
         return bool(toolbar and getattr(toolbar, "mode", ""))
+
+    def _connect_view_limit_callbacks(self) -> None:
+        """Observe zoom, pan, Home, Back, and Forward viewport changes.
+
+        Axes.clear() removes these Matplotlib callback registrations,
+        so this method is called after every complete pair redraw.
+        """
+        self.axes.callbacks.connect(
+            "xlim_changed",
+            self._view_limits_changed,
+        )
+        self.axes.callbacks.connect(
+            "ylim_changed",
+            self._view_limits_changed,
+        )
+
+
+    def _view_bounds(
+        self,
+    ) -> tuple[float, float, float, float] | None:
+        """Return normalized current map bounds."""
+
+        x_1, x_2 = self.axes.get_xlim()
+        y_1, y_2 = self.axes.get_ylim()
+
+        bounds = (
+            min(float(x_1), float(x_2)),
+            min(float(y_1), float(y_2)),
+            max(float(x_1), float(x_2)),
+            max(float(y_1), float(y_2)),
+        )
+
+        if not all(math.isfinite(value) for value in bounds):
+            return None
+
+        if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+            return None
+
+        return bounds
+
+
+    def _view_limits_changed(self, _: Any) -> None:
+        """Handle Matplotlib viewport changes."""
+
+        if self._suspend_view_refresh or self._shutting_down:
+            return
+
+        self.request_basemap_refresh()
+
+
+    def request_basemap_refresh(self) -> None:
+        """Queue a basemap refresh for the newest viewport.
+
+        Repeated zoom or pan events update the pending bounds without
+        restarting the timer. This ensures no more than one online
+        basemap refresh in each five-second interval.
+        """
+
+        if (
+            self._shutting_down
+            or not self._basemap_enabled
+            or self._current_pipeline is None
+        ):
+            return
+
+        bounds = self._view_bounds()
+        if bounds is None:
+            return
+
+        # Always retain the newest visible viewport.
+        self._pending_basemap_bounds = bounds
+
+        elapsed_ms = int(
+            max(
+                0.0,
+                time.monotonic() - self._last_basemap_refresh_at,
+            )
+            * 1000
+        )
+
+        delay_ms = max(
+            0,
+            BASEMAP_VIEW_REFRESH_INTERVAL_MS - elapsed_ms,
+        )
+
+        # Do not restart an existing timer. Zoom and pan events only
+        # replace the pending bounds.
+        if not self._basemap_refresh_timer.isActive():
+            self._basemap_refresh_timer.start(delay_ms)
+
+
+    def _run_pending_basemap_refresh(self) -> None:
+        """Download tiles for the most recent queued viewport."""
+
+        if (
+            self._shutting_down
+            or not self._basemap_enabled
+            or self._current_pipeline is None
+            or self._pending_basemap_bounds is None
+        ):
+            self._pending_basemap_bounds = None
+            return
+
+        bounds = self._pending_basemap_bounds
+        self._pending_basemap_bounds = None
+
+        # Invalidate and cancel any older tile request.
+        self._draw_token += 1
+        token = self._draw_token
+        self._cancel_tile_requests()
+
+        self._schedule_basemap(
+            token,
+            bounds,
+            self._current_pipeline,
+        )
+
+
+    def _remove_basemap_artists(self) -> None:
+        """Remove the existing basemap and attribution artists."""
+
+        for attribute in (
+            "_basemap_image_artist",
+            "_basemap_attribution_artist",
+        ):
+            artist = getattr(self, attribute, None)
+            if artist is None:
+                continue
+
+            try:
+                artist.remove()
+            except (AttributeError, RuntimeError, ValueError):
+                pass
+
+            setattr(self, attribute, None)
 
     def _on_scroll(self, event: Any) -> None:
         if event.xdata is None or event.ydata is None:
@@ -256,7 +413,11 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         if self._shutting_down or token != self._draw_token:
             return
 
-        zoom, x_min, y_min, x_max, y_max = self._tile_grid(bounds)
+        self._last_basemap_refresh_at = time.monotonic()
+
+        zoom, x_min, y_min, x_max, y_max = self._tile_grid(
+            bounds
+        )
         cache_key = (zoom, x_min, y_min, x_max, y_max)
         cached = self._basemap_cache.get(cache_key)
         if cached is not None:
@@ -385,39 +546,68 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._apply_basemap(token, array, extent)
 
     def _apply_basemap(
-        self, token: int, image: np.ndarray, extent: tuple[float, ...]
+        self,
+        token: int,
+        image: np.ndarray,
+        extent: tuple[float, ...],
     ) -> None:
         if token != self._draw_token or self._shutting_down:
             return
+
         current_xlim = self.axes.get_xlim()
         current_ylim = self.axes.get_ylim()
-        self.axes.imshow(
-            image,
-            extent=extent,
-            interpolation="bilinear",
-            origin="upper",
-            zorder=0,
-        )
-        self.axes.text(
-            0.005,
-            0.005,
-            "© OpenStreetMap contributors",
-            transform=self.axes.transAxes,
-            fontsize=7,
-            alpha=0.75,
-            zorder=20,
-        )
-        self.axes.set_xlim(*current_xlim)
-        self.axes.set_ylim(*current_ylim)
+
+        # Adding the image and restoring the existing limits generates
+        # Matplotlib limit-change events. Suppress refresh scheduling
+        # during this internal operation.
+        self._suspend_view_refresh = True
+
+        try:
+            self._remove_basemap_artists()
+
+            self._basemap_image_artist = self.axes.imshow(
+                image,
+                extent=extent,
+                interpolation="bilinear",
+                origin="upper",
+                zorder=0,
+            )
+
+            self._basemap_attribution_artist = self.axes.text(
+                0.005,
+                0.005,
+                "© OpenStreetMap contributors",
+                transform=self.axes.transAxes,
+                fontsize=7,
+                alpha=0.75,
+                zorder=20,
+            )
+
+            # Keep the exact viewport selected by the user.
+            self.axes.set_xlim(*current_xlim)
+            self.axes.set_ylim(*current_ylim)
+
+        finally:
+            self._suspend_view_refresh = False
+
         self.draw_idle()
 
     def shutdown(self) -> None:
-        """Abort network activity without waiting for any background thread."""
+        """Abort network and scheduled map-refresh activity."""
+
         if self._shutting_down:
             return
+
         self._shutting_down = True
         self._draw_token += 1
+
+        self._basemap_refresh_timer.stop()
+        self._pending_basemap_bounds = None
+        self._current_pipeline = None
+        self._basemap_enabled = False
+
         self._cancel_tile_requests()
+        self._remove_basemap_artists()
         self._basemap_cache.clear()
 
     def draw_pair(
@@ -427,6 +617,12 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             return "", ""
         self._draw_token += 1
         token = self._draw_token
+
+        self._basemap_refresh_timer.stop()
+        self._pending_basemap_bounds = None
+        self._current_pipeline = pipeline
+        self._basemap_enabled = bool(include_basemap)
+
         self._cancel_tile_requests()
 
         pair = pipeline.pair_features(
@@ -456,6 +652,10 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         )
 
         ax = self.axes
+
+        # Suppress callbacks while constructing a complete new pair map.
+        self._suspend_view_refresh = True
+        self._remove_basemap_artists()
         ax.clear()
         ax.set_xlim(web_view[0], web_view[2])
         ax.set_ylim(web_view[1], web_view[3])
@@ -553,6 +753,9 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         ax.set_xlim(web_view[0], web_view[2])
         ax.set_ylim(web_view[1], web_view[3])
         ax.set_aspect("equal")
+
+        self._suspend_view_refresh = False
+        self._connect_view_limit_callbacks()
 
         self.draw_idle()
         if include_basemap:
