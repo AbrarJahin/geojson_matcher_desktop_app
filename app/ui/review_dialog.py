@@ -113,6 +113,15 @@ class ManualReviewDialog(QDialog):
         self.basemap_checkbox.setChecked(include_basemap)
         self.basemap_checkbox.toggled.connect(self._redraw)
 
+        self.axis_labels_checkbox = QCheckBox("Axis labels")
+        self.axis_labels_checkbox.setChecked(True)
+        self.axis_labels_checkbox.setToolTip(
+            "Show or hide the X/Y axis titles, tick marks, and coordinate labels."
+        )
+        self.axis_labels_checkbox.toggled.connect(
+            self._apply_axis_label_visibility
+        )
+
         self.previous_button = QPushButton("Previous")
         self.next_button = QPushButton("Next")
         self.no_button = QPushButton("No — Do not connect")
@@ -227,7 +236,11 @@ class ManualReviewDialog(QDialog):
         nav_buttons.addWidget(self.previous_button)
         nav_buttons.addWidget(self.next_button)
         navigation_layout.addLayout(nav_buttons)
-        navigation_layout.addWidget(self.basemap_checkbox)
+        map_options = QHBoxLayout()
+        map_options.addWidget(self.basemap_checkbox)
+        map_options.addWidget(self.axis_labels_checkbox)
+        map_options.addStretch(1)
+        navigation_layout.addLayout(map_options)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -354,7 +367,40 @@ class ManualReviewDialog(QDialog):
         road_name_1, road_name_2 = self.canvas.draw_pair(
             self.pipeline, row, include_basemap=self.basemap_checkbox.isChecked()
         )
+        self._apply_axis_label_visibility(
+            self.axis_labels_checkbox.isChecked()
+        )
         self.legend_label.setText(self._legend_html(road_name_1, road_name_2))
+
+    def _apply_axis_label_visibility(self, visible: bool) -> None:
+        """Toggle coordinate annotations and let the map reclaim their space."""
+        axes = self.canvas.axes
+        is_visible = bool(visible)
+
+        axes.xaxis.label.set_visible(is_visible)
+        axes.yaxis.label.set_visible(is_visible)
+        axes.xaxis.get_offset_text().set_visible(is_visible)
+        axes.yaxis.get_offset_text().set_visible(is_visible)
+        axes.tick_params(
+            axis="both",
+            which="both",
+            bottom=is_visible,
+            left=is_visible,
+            labelbottom=is_visible,
+            labelleft=is_visible,
+        )
+
+        # The map figure already uses Matplotlib's tight-layout engine.
+        # Recomputing it here expands the plot into the released left/bottom
+        # margins, or restores those margins when the labels are enabled.
+        try:
+            self.canvas.figure.tight_layout()
+        except (RuntimeError, ValueError):
+            LOGGER.debug(
+                "Matplotlib could not recompute the map layout immediately.",
+                exc_info=True,
+            )
+        self.canvas.draw_idle()
 
     def _redraw(self) -> None:
         if not self.rows.empty and not self._changing_pair and not self._closing:
@@ -382,6 +428,7 @@ class ManualReviewDialog(QDialog):
             enabled and self.current_index < len(self.rows) - 1
         )
         self.basemap_checkbox.setEnabled(enabled)
+        self.axis_labels_checkbox.setEnabled(enabled)
         self.close_button.setEnabled(enabled)
         self.quit_button.setEnabled(enabled)
 
