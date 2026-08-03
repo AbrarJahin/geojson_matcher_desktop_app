@@ -108,7 +108,7 @@ class MainWindow(QMainWindow):
         # Resume the last valid project automatically. Analysis must run again
         # to reconstruct notebook state before compatible saved decisions can
         # be merged into the in-memory review queue.
-        QTimer.singleShot(350, self._auto_start_last_project)
+        # QTimer.singleShot(350, self._auto_start_last_project)
 
     def _build_input_group(self) -> QGroupBox:
         group = QGroupBox("Local files")
