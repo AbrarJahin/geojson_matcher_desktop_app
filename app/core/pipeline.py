@@ -46,7 +46,17 @@ LogCallback = Callable[[str], None]
 StageCallback = Callable[[int, int, str], None]
 
 VALID_EXTENSIONS = {".json", ".geojson"}
-SESSION_SCHEMA_VERSION = 2
+SESSION_SCHEMA_VERSION = 3
+
+# Fixed production thresholds calibrated and audited in notebook #6.
+SAFE_REJECT_GLOBAL_THRESHOLD = 0.937979492358832
+SAFE_REJECT_PARALLEL_THRESHOLD = 0.9824399697184324
+SAFE_REJECT_ORTHOGONAL_THRESHOLD = 0.994316437083394
+SAFE_REJECT_LOCAL_HALF_WINDOW_M = 60.0
+SAFE_REJECT_MIN_LOCAL_STRAIGHTNESS = 0.98
+SAFE_REJECT_MAX_LOCAL_CUMULATIVE_TURN_DEG = 10.0
+SAFE_REJECT_PARALLEL_MAX_HEADING_DIFF_DEG = 10.0
+SAFE_REJECT_ORTHOGONAL_MIN_HEADING_DIFF_DEG = 80.0
 
 
 class _InMemoryCsvBuffer(io.StringIO):
@@ -246,6 +256,9 @@ class RoadMatchingPipeline:
             "max_manual_batch_size": cfg.max_manual_batch_size,
             "random_state": cfg.random_state,
             "legacy_program_sha256": _legacy_program_sha256(),
+            "safe_reject_global_threshold": SAFE_REJECT_GLOBAL_THRESHOLD,
+            "safe_reject_parallel_threshold": SAFE_REJECT_PARALLEL_THRESHOLD,
+            "safe_reject_orthogonal_threshold": SAFE_REJECT_ORTHOGONAL_THRESHOLD,
         }
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         self._session_signature = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -478,6 +491,20 @@ class RoadMatchingPipeline:
             "MIN_MANUAL_REVIEW_FRACTION": cfg.min_manual_review_fraction,
             "MAX_MANUAL_REVIEW_FRACTION": cfg.max_manual_review_fraction,
             "MAX_MANUAL_BATCH_SIZE": cfg.max_manual_batch_size,
+            "SAFE_REJECT_GLOBAL_THRESHOLD": SAFE_REJECT_GLOBAL_THRESHOLD,
+            "SAFE_REJECT_PARALLEL_THRESHOLD": SAFE_REJECT_PARALLEL_THRESHOLD,
+            "SAFE_REJECT_ORTHOGONAL_THRESHOLD": SAFE_REJECT_ORTHOGONAL_THRESHOLD,
+            "SAFE_REJECT_LOCAL_HALF_WINDOW_M": SAFE_REJECT_LOCAL_HALF_WINDOW_M,
+            "SAFE_REJECT_MIN_LOCAL_STRAIGHTNESS": SAFE_REJECT_MIN_LOCAL_STRAIGHTNESS,
+            "SAFE_REJECT_MAX_LOCAL_CUMULATIVE_TURN_DEG": (
+                SAFE_REJECT_MAX_LOCAL_CUMULATIVE_TURN_DEG
+            ),
+            "SAFE_REJECT_PARALLEL_MAX_HEADING_DIFF_DEG": (
+                SAFE_REJECT_PARALLEL_MAX_HEADING_DIFF_DEG
+            ),
+            "SAFE_REJECT_ORTHOGONAL_MIN_HEADING_DIFF_DEG": (
+                SAFE_REJECT_ORTHOGONAL_MIN_HEADING_DIFF_DEG
+            ),
             "COUNTY_FILE_1": str(cfg.county_file_1),
             "COUNTY_FILE_2": str(cfg.county_file_2),
             "COUNTY_1_NAME": county_name_from_filename(cfg.county_file_1),
@@ -549,16 +576,15 @@ class RoadMatchingPipeline:
             self.log(f"Restored {completed} completed manual decision(s) into RAM.")
         diagnostics = self.manual_review_diagnostics()
         self.log(
-            "Manual-review barrier verified: "
-            f"selected {diagnostics['selected']} of {diagnostics['total_candidates']} "
-            f"({diagnostics['selected_fraction']:.2%}); allowed integer range "
-            f"{diagnostics['minimum']}..{diagnostics['maximum']} "
-            f"({diagnostics['minimum_fraction']:.0%}.."
-            f"{diagnostics['maximum_fraction']:.0%})."
+            "Two-category decision partition verified: "
+            f"SAFE_REJECT={diagnostics['safe_rejected']} "
+            f"({diagnostics['safe_reject_fraction']:.2%}); "
+            f"MANUAL_REVIEW={diagnostics['selected']} "
+            f"({diagnostics['selected_fraction']:.2%})."
         )
         self.log(
-            "Desktop review presentation order verified: lowest combined probability "
-            "to highest within the unchanged notebook-selected queue."
+            "Every candidate not safely rejected is present in the manual-review queue. "
+            "Desktop map presentation remains lowest combined probability to highest."
         )
         self.log("Analysis pipeline completed.")
         return self
@@ -591,8 +617,18 @@ class RoadMatchingPipeline:
 
     @property
     def optimized_threshold(self) -> float:
+        """Backward-compatible alias for the global Safe Reject threshold."""
         self._require_analysis()
-        return float(self.namespace["OPTIMISED_THRESHOLD"])
+        return float(self.namespace["SAFE17_GLOBAL_THRESHOLD"])
+
+    @property
+    def safe_reject_thresholds(self) -> dict[str, float]:
+        self._require_analysis()
+        return {
+            "global": float(self.namespace["SAFE17_GLOBAL_THRESHOLD"]),
+            "parallel": float(self.namespace["SAFE17_PARALLEL_THRESHOLD"]),
+            "orthogonal": float(self.namespace["SAFE17_ORTHOGONAL_THRESHOLD"]),
+        }
 
     @property
     def has_unsaved_decisions(self) -> bool:
@@ -610,45 +646,57 @@ class RoadMatchingPipeline:
     def _manual_review_bounds_for_total(
         total_pairs: int, minimum_fraction: float, maximum_fraction: float
     ) -> tuple[int, int]:
-        """Mirror notebook #7's integer 2%-to-30% review bounds exactly."""
+        """Compatibility helper retained for callers from older app versions.
+
+        The two-category workflow no longer samples a percentage of candidates.
+        Its true review count is determined by the Safe Reject partition.
+        """
         total_pairs = int(total_pairs)
         if total_pairs < 0:
             raise ValueError("total_pairs cannot be negative.")
-        if total_pairs == 0:
-            return 0, 0
-
-        minimum = max(1, int(math.ceil(total_pairs * float(minimum_fraction))))
-        maximum = max(1, int(math.floor(total_pairs * float(maximum_fraction))))
-        if minimum > maximum:
-            # Same tiny-dataset exception used by notebook #7.
-            minimum = maximum = 1
-        return minimum, maximum
+        return 0, total_pairs
 
     def manual_review_diagnostics(self) -> dict[str, int | float | bool]:
-        """Report and strictly validate the notebook's review-count barrier."""
+        """Validate that every non-Safe-Reject pair is queued for manual review."""
         frame = self.decision_df
         total = int(len(frame))
-        selected = int(frame["requires_manual_verification"].astype(bool).sum())
-        minimum, maximum = self._manual_review_bounds_for_total(
-            total,
-            self.config.min_manual_review_fraction,
-            self.config.max_manual_review_fraction,
+        manual_mask = frame["requires_manual_verification"].astype(bool)
+        selected = int(manual_mask.sum())
+
+        if "safe_reject_decision" not in frame.columns:
+            raise RuntimeError("The two-category Safe Reject decision column is missing.")
+
+        safe_mask = frame["safe_reject_decision"].astype(str).eq("SAFE_REJECT")
+        manual_category_mask = (
+            frame["safe_reject_decision"].astype(str).eq("MANUAL_REVIEW")
         )
-        within_bounds = minimum <= selected <= maximum if total else selected == 0
-        if not within_bounds:
+        safe_rejected = int(safe_mask.sum())
+
+        partition_valid = bool(
+            (safe_mask ^ manual_category_mask).all()
+            and manual_mask.equals(manual_category_mask)
+            and selected + safe_rejected == total
+        )
+        if not partition_valid:
             raise RuntimeError(
-                "Manual-review count is outside notebook #7's configured barrier: "
-                f"selected={selected}, allowed={minimum}..{maximum}, total={total}."
+                "The two-category partition is invalid: every pair must be exactly one "
+                "of SAFE_REJECT or MANUAL_REVIEW, and every MANUAL_REVIEW pair must "
+                "be present in the review queue."
             )
+
+        selected_fraction = (selected / total) if total else 0.0
+        safe_fraction = (safe_rejected / total) if total else 0.0
         return {
             "total_candidates": total,
             "selected": selected,
-            "minimum": minimum,
-            "maximum": maximum,
-            "selected_fraction": (selected / total) if total else 0.0,
-            "minimum_fraction": float(self.config.min_manual_review_fraction),
-            "maximum_fraction": float(self.config.max_manual_review_fraction),
-            "within_bounds": within_bounds,
+            "safe_rejected": safe_rejected,
+            "minimum": selected,
+            "maximum": selected,
+            "selected_fraction": selected_fraction,
+            "safe_reject_fraction": safe_fraction,
+            "minimum_fraction": selected_fraction,
+            "maximum_fraction": selected_fraction,
+            "within_bounds": partition_valid,
         }
 
     def review_rows(self, include_completed: bool = True) -> pd.DataFrame:
@@ -680,12 +728,18 @@ class RoadMatchingPipeline:
         selected = self.review_rows(include_completed=True)
         completed = int(selected["manual_decision"].notna().sum())
         diagnostics = self.manual_review_diagnostics()
+        thresholds = self.safe_reject_thresholds
         return {
             "total_candidates": int(diagnostics["total_candidates"]),
+            "safe_rejected": int(diagnostics["safe_rejected"]),
+            "safe_reject_fraction": float(diagnostics["safe_reject_fraction"]),
             "selected": int(diagnostics["selected"]),
             "completed": completed,
             "remaining": int(len(selected) - completed),
-            "threshold": self.optimized_threshold,
+            "threshold": thresholds["global"],
+            "global_threshold": thresholds["global"],
+            "parallel_threshold": thresholds["parallel"],
+            "orthogonal_threshold": thresholds["orthogonal"],
             "minimum_review_count": int(diagnostics["minimum"]),
             "maximum_review_count": int(diagnostics["maximum"]),
             "selected_fraction": float(diagnostics["selected_fraction"]),

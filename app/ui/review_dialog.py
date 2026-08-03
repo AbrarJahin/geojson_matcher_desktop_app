@@ -41,9 +41,10 @@ def _format_probability(value: Any) -> str:
 class ManualReviewDialog(QDialog):
     """Full-work-area manual-review window.
 
-    Notebook #7 determines which rows are selected. ``pipeline.review_rows``
-    presents that unchanged selected set from lowest combined probability to
-    highest. Yes/No decisions remain in RAM until the application quit flow.
+    Every pair not classified as SAFE_REJECT is shown in the existing map UI.
+    ``pipeline.review_rows`` presents the complete MANUAL_REVIEW set from lowest
+    combined probability to highest. Yes/No decisions remain in RAM until the
+    application quit flow.
     """
 
     all_completed = Signal()
@@ -278,21 +279,19 @@ class ManualReviewDialog(QDialog):
         try:
             diagnostics = self.pipeline.manual_review_diagnostics()
             return (
-                f"Notebook #7 selected <b>{diagnostics['selected']}</b> of "
-                f"<b>{diagnostics['total_candidates']}</b> candidates "
-                f"({diagnostics['selected_fraction']:.2%}).<br>"
-                f"Allowed integer range: <b>{diagnostics['minimum']}</b> to "
-                f"<b>{diagnostics['maximum']}</b> "
-                f"({diagnostics['minimum_fraction']:.0%}–"
-                f"{diagnostics['maximum_fraction']:.0%}).<br><br>"
-                "Display order: <b>lowest combined probability → highest</b> "
-                "within the unchanged notebook-selected queue."
+                f"Safely rejected automatically: <b>{diagnostics['safe_rejected']}</b> "
+                f"of <b>{diagnostics['total_candidates']}</b> candidates "
+                f"({diagnostics['safe_reject_fraction']:.2%}).<br>"
+                f"Complete manual-review queue: <b>{diagnostics['selected']}</b> "
+                f"pairs ({diagnostics['selected_fraction']:.2%}).<br><br>"
+                "Every candidate not safely rejected is included. Display order: "
+                "<b>lowest combined probability → highest</b>."
             )
         except Exception:
             LOGGER.exception("Could not build manual-review policy details.")
             return (
-                "Display order: <b>lowest combined probability → highest</b> "
-                "within the notebook-selected queue."
+                "Every candidate not safely rejected is included. Display order: "
+                "<b>lowest combined probability → highest</b>."
             )
 
     def _legend_html(self, road_name_1: str, road_name_2: str) -> str:
@@ -333,8 +332,10 @@ class ManualReviewDialog(QDialog):
             + _format_probability(row.get("textual_valid_pair_probability"))
             + "<br><b>Combined:</b> "
             + _format_probability(row.get("probablity"))
-            + "<br><b>Threshold:</b> "
-            + _format_probability(self.pipeline.optimized_threshold)
+            + "<br><b>Applicable Safe Reject threshold:</b> "
+            + _format_probability(
+                row.get("safe17_applied_threshold", self.pipeline.optimized_threshold)
+            )
         )
         self.reason_label.setText(
             "<b>Selection reason:</b><br>"

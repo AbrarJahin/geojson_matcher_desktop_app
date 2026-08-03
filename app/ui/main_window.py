@@ -306,15 +306,28 @@ class MainWindow(QMainWindow):
         )
         self.summary_label.setText(
             f"Candidate pairs: {summary['total_candidates']} | "
-            f"Manual review selected: {summary['selected']} "
+            f"Safely rejected: {summary['safe_rejected']} "
+            f"({summary['safe_reject_fraction']:.2%}) | "
+            f"Manual review: {summary['selected']} "
             f"({summary['selected_fraction']:.2%}) | "
-            f"Allowed count: {summary['minimum_review_count']}–"
-            f"{summary['maximum_review_count']} | "
-            f"Completed: {summary['completed']} | Remaining: {summary['remaining']} | "
-            f"Optimized threshold: {summary['threshold']:.6f}<br>{session_text}"
+            f"Completed: {summary['completed']} | Remaining: {summary['remaining']}<br>"
+            f"Safe thresholds — global: {summary['global_threshold']:.6f}, "
+            f"parallel: {summary['parallel_threshold']:.6f}, "
+            f"near-90°: {summary['orthogonal_threshold']:.6f}<br>{session_text}"
         )
         self._set_busy(False, "Analysis complete.")
         self.review_button.setEnabled(summary["selected"] > 0)
+        QMessageBox.information(
+            self,
+            "Processing complete",
+            f"Processing generated {summary['total_candidates']:,} candidate pairs.\n\n"
+            f"Safely rejected: {summary['safe_rejected']:,} "
+            f"({summary['safe_reject_fraction']:.2%})\n"
+            f"Require manual review: {summary['selected']:,} "
+            f"({summary['selected_fraction']:.2%})\n\n"
+            "All pairs that were not safely rejected will now be shown in the "
+            "existing verification map.",
+        )
         if summary["remaining"] > 0:
             self._open_review()
         else:
@@ -332,12 +345,14 @@ class MainWindow(QMainWindow):
         summary = self.pipeline.review_summary()
         self.summary_label.setText(
             f"Candidate pairs: {summary['total_candidates']} | "
-            f"Manual review selected: {summary['selected']} "
+            f"Safely rejected: {summary['safe_rejected']} "
+            f"({summary['safe_reject_fraction']:.2%}) | "
+            f"Manual review: {summary['selected']} "
             f"({summary['selected_fraction']:.2%}) | "
-            f"Allowed count: {summary['minimum_review_count']}–"
-            f"{summary['maximum_review_count']} | "
-            f"Completed: {summary['completed']} | Remaining: {summary['remaining']} | "
-            f"Optimized threshold: {summary['threshold']:.6f}<br>"
+            f"Completed: {summary['completed']} | Remaining: {summary['remaining']}<br>"
+            f"Safe thresholds — global: {summary['global_threshold']:.6f}, "
+            f"parallel: {summary['parallel_threshold']:.6f}, "
+            f"near-90°: {summary['orthogonal_threshold']:.6f}<br>"
             f"Session file: {self.pipeline.session_path}"
         )
         if summary["remaining"] == 0:
