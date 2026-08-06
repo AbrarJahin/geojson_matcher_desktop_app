@@ -63,7 +63,9 @@ def test_valid_remembered_project_auto_starts_with_or_without_saved_state(
     window.close()
 
 
-def test_review_completion_starts_finalization_automatically(monkeypatch, tmp_path: Path) -> None:
+def test_review_completion_starts_finalization_automatically(
+    monkeypatch, tmp_path: Path
+) -> None:
     _app()
     monkeypatch.setattr(main_window_module, "QTimer", _NoStartupTimer)
     window = MainWindow()
@@ -76,13 +78,18 @@ def test_review_completion_starts_finalization_automatically(monkeypatch, tmp_pa
         def review_summary(self):
             return {
                 "total_candidates": 100,
+                "safe_rejected": 98,
+                "safe_reject_fraction": 0.98,
                 "selected": 2,
                 "selected_fraction": 0.02,
                 "minimum_review_count": 2,
-                "maximum_review_count": 30,
+                "maximum_review_count": 2,
                 "completed": 2,
                 "remaining": 0,
                 "threshold": 0.5,
+                "global_threshold": 0.5,
+                "parallel_threshold": 0.6,
+                "orthogonal_threshold": 0.7,
             }
 
     class CompletedDialog:
