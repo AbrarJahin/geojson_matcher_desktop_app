@@ -22,6 +22,7 @@ class JunctionMember:
     measure_m: float
     contact_x: float
     contact_y: float
+    address_summary: str = "Addr: —"
     selected: bool = True
 
     @property
@@ -150,6 +151,90 @@ def _member_name(row: pd.Series, county_index: int, road_id: str) -> str:
     )
 
 
+def _address_number(value: Any) -> str | None:
+    """Return a compact address number, or ``None`` for missing/zero values."""
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number == 0:
+        return None
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:g}"
+
+
+def _address_parity(value: Any) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip().upper()
+
+
+def _county_address_value(
+    row: pd.Series,
+    county_index: int,
+    source_field: str,
+    prepared_field: str,
+) -> Any:
+    """Prefer the requested source JSON field; fall back to its prepared copy."""
+    suffix = "county1" if county_index == 1 else "county2"
+    source_column = f"{source_field}_{suffix}"
+    if source_column in row.index:
+        value = row.get(source_column)
+        try:
+            if not pd.isna(value):
+                return value
+        except Exception:
+            return value
+    return row.get(f"{prepared_field}_{suffix}")
+
+
+def format_address_summary(row: pd.Series, county_index: int) -> str:
+    """Format one road's address ranges for compact desktop display only.
+
+    Original ``fromaddr_*``/``toaddr_*``/``parity_*`` values are preferred.
+    The already-prepared equivalents are used only as a compatibility fallback.
+    """
+    left_from = _address_number(
+        _county_address_value(row, county_index, "fromaddr_l", "from_left")
+    )
+    left_to = _address_number(
+        _county_address_value(row, county_index, "toaddr_l", "to_left")
+    )
+    right_from = _address_number(
+        _county_address_value(row, county_index, "fromaddr_r", "from_right")
+    )
+    right_to = _address_number(
+        _county_address_value(row, county_index, "toaddr_r", "to_right")
+    )
+    parity_left = _address_parity(
+        _county_address_value(row, county_index, "parity_l", "parity_left")
+    )
+    parity_right = _address_parity(
+        _county_address_value(row, county_index, "parity_r", "parity_right")
+    )
+
+    sides: list[str] = []
+    if left_from is not None and left_to is not None:
+        parity = f" {parity_left}" if parity_left else ""
+        sides.append(f"L {left_from}–{left_to}{parity}")
+    if right_from is not None and right_to is not None:
+        parity = f" {parity_right}" if parity_right else ""
+        sides.append(f"R {right_from}–{right_to}{parity}")
+    return "Addr: " + (" | ".join(sides) if sides else "—")
+
+
 def _edge_from_row(
     row: pd.Series,
     *,
@@ -189,6 +274,7 @@ def _edge_from_row(
         measure_m=attachment_1[2],
         contact_x=float(attachment_1[3].x),
         contact_y=float(attachment_1[3].y),
+        address_summary=format_address_summary(row, 1),
     )
     member_2 = JunctionMember(
         key=key_2,
@@ -200,6 +286,7 @@ def _edge_from_row(
         measure_m=attachment_2[2],
         contact_x=float(attachment_2[3].x),
         contact_y=float(attachment_2[3].y),
+        address_summary=format_address_summary(row, 2),
     )
 
     try:

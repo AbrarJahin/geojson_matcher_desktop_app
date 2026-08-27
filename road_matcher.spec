@@ -7,8 +7,12 @@ datas = []
 for package in ["geopandas", "pyproj", "matplotlib"]:
     datas += collect_data_files(package, include_py_files=False)
 
-# Application branding used by Qt at runtime.
-datas += [("app/resources/road_matcher.png", "app/resources")]
+# Application branding used by Qt at runtime.  Bundle the ICO as data too so
+# Windows can use the same multi-resolution icon for the live taskbar window.
+datas += [
+    ("app/resources/road_matcher.png", "app/resources"),
+    ("app/resources/road_matcher.ico", "app/resources"),
+]
 
 binaries = []
 for package in ["pyproj", "pyogrio", "shapely"]:

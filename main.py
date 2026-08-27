@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import ctypes
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -12,11 +14,32 @@ from app.logging_setup import GuardedApplication, configure_logging
 from app.ui.main_window import MainWindow
 
 
+WINDOWS_APP_USER_MODEL_ID = "RoadMatcher.Research.Desktop"
+
+
+def _set_windows_app_identity() -> None:
+    """Give Windows a stable taskbar identity before Qt creates any windows."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(  # type: ignore[attr-defined]
+            WINDOWS_APP_USER_MODEL_ID
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Could not set the Windows AppUserModelID; continuing normally."
+        )
+
+
 def _application_icon_path() -> Path:
-    """Return the bundled Road Matcher icon in source and PyInstaller builds."""
+    """Return the best bundled Road Matcher icon for this platform."""
 
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    return bundle_root / "app" / "resources" / "road_matcher.png"
+    resources = bundle_root / "app" / "resources"
+    ico_path = resources / "road_matcher.ico"
+    if os.name == "nt" and ico_path.is_file():
+        return ico_path
+    return resources / "road_matcher.png"
 
 
 def main() -> int:
@@ -27,6 +50,7 @@ def main() -> int:
     GuardedApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
+    _set_windows_app_identity()
     application = GuardedApplication(sys.argv)
     application.setApplicationName("Road Matcher")
     application.setApplicationVersion(__version__)

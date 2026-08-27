@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.junctions import format_address_summary
 from app.ui.map_canvas import InteractiveMapCanvas, MapNavigationToolbar
 
 LOGGER = logging.getLogger(__name__)
@@ -247,6 +248,15 @@ class ManualReviewDialog(QDialog):
         self.members_layout.addWidget(self.reset_point_button)
         self.members_group.setVisible(self._junction_mode)
 
+        self.address_group = QGroupBox("Selected road address ranges")
+        address_layout = QVBoxLayout(self.address_group)
+        self.address_label = QLabel("Addr: —")
+        self.address_label.setWordWrap(True)
+        self.address_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        address_layout.addWidget(self.address_label)
+
         policy_group = QGroupBox("Review policy")
         policy_layout = QVBoxLayout(policy_group)
         policy_layout.addWidget(self.policy_label)
@@ -273,6 +283,7 @@ class ManualReviewDialog(QDialog):
         content_layout.setSpacing(8)
         content_layout.addWidget(details_group)
         content_layout.addWidget(self.members_group)
+        content_layout.addWidget(self.address_group)
         content_layout.addWidget(policy_group)
         content_layout.addWidget(legend_group)
         content_layout.addWidget(navigation_group)
@@ -434,6 +445,23 @@ class ManualReviewDialog(QDialog):
             else f"Decision in memory: {proposal.decision.upper()}"
         )
 
+    def _update_address_ranges(self, proposal: Any) -> None:
+        lines = []
+        for member in proposal.members:
+            if not member.selected:
+                continue
+            county_name = (
+                self.pipeline.county_1_name
+                if int(member.county_index) == 1
+                else self.pipeline.county_2_name
+            )
+            lines.append(
+                f"{html.escape(str(county_name))} "
+                f"{html.escape(str(member.road_name))} "
+                f"{html.escape(str(member.address_summary))}"
+            )
+        self.address_label.setText("<br>".join(lines) if lines else "Addr: —")
+
     def _show_current_junction(self, *, redraw_controls: bool = True) -> None:
         if not self._junction_mode or self._item_count() == 0 or self._closing:
             return
@@ -477,6 +505,7 @@ class ManualReviewDialog(QDialog):
                 self._member_checkboxes[member.key] = box
 
         self._update_junction_status_labels(proposal)
+        self._update_address_ranges(proposal)
         self.canvas.draw_junction(
             self.pipeline,
             proposal,
@@ -507,6 +536,14 @@ class ManualReviewDialog(QDialog):
             f"{html.escape(str(row['county_1_id']))}<br>"
             f"<b>{html.escape(str(self.pipeline.county_2_name))} road ID:</b> "
             f"{html.escape(str(row['county_2_id']))}"
+        )
+        self.address_label.setText(
+            f"{html.escape(str(self.pipeline.county_1_name))} "
+            f"{html.escape(str(row.get('full_road_label_county1') or row.get('road_name_county1') or row['county_1_id']))} "
+            f"{html.escape(format_address_summary(row, 1))}<br>"
+            f"{html.escape(str(self.pipeline.county_2_name))} "
+            f"{html.escape(str(row.get('full_road_label_county2') or row.get('road_name_county2') or row['county_2_id']))} "
+            f"{html.escape(format_address_summary(row, 2))}"
         )
         self.probability_label.setText(
             "<b>Geometric:</b> "
