@@ -62,3 +62,33 @@ class FinalizationWorker(QObject):
             traceback_text = traceback.format_exc()
             LOGGER.error("Finalization worker failed:\n%s", traceback_text)
             self.failed.emit(traceback_text)
+
+
+class JunctionRoundWorker(QObject):
+    log = Signal(str)
+    stage = Signal(int, int, str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, pipeline: RoadMatchingPipeline):
+        super().__init__()
+        self.pipeline = pipeline
+
+    @Slot()
+    def run(self) -> None:
+        LOGGER.info("Junction-round worker started.")
+        try:
+            previous_logger = self.pipeline._logger
+            self.pipeline.set_logger(self.log.emit)
+            try:
+                result = self.pipeline.complete_junction_round(
+                    stage_callback=self.stage.emit
+                )
+            finally:
+                self.pipeline.set_logger(previous_logger)
+            self.completed.emit(result)
+            LOGGER.info("Junction-round worker completed.")
+        except Exception:
+            traceback_text = traceback.format_exc()
+            LOGGER.error("Junction-round worker failed:\n%s", traceback_text)
+            self.failed.emit(traceback_text)

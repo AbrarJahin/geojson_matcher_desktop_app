@@ -10,7 +10,7 @@ import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.ticker import ScalarFormatter
-from PySide6.QtCore import QTimer, Qt, QUrl
+from PySide6.QtCore import QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QWidget
@@ -26,6 +26,7 @@ MAX_TILE_REQUESTS = 16
 BASEMAP_VIEW_REFRESH_INTERVAL_MS = 5_000
 
 class InteractiveMapCanvas(FigureCanvasQTAgg):
+    junction_point_changed = Signal(float, float)
     """Matplotlib road review map with non-blocking Qt-native tile requests.
 
     No QRunnable, Python worker thread, contextily, rasterio, or GDAL operation
@@ -44,6 +45,10 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._drag_state: (
             tuple[float, float, tuple[float, float], tuple[float, float]] | None
         ) = None
+        self._junction_dragging = False
+        self._junction_marker_artist: Any | None = None
+        self._junction_point_web: Point | None = None
+        self._junction_source_crs: str | None = None
         self._draw_token = 0
         self._shutting_down = False
         self._transformers: dict[str, Transformer] = {}
@@ -250,6 +255,21 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             or self._toolbar_is_active()
         ):
             return
+
+        if (
+            self._junction_marker_artist is not None
+            and self._junction_point_web is not None
+            and event.x is not None
+            and event.y is not None
+        ):
+            marker_x, marker_y = self.axes.transData.transform(
+                (self._junction_point_web.x, self._junction_point_web.y)
+            )
+            if math.hypot(float(event.x) - marker_x, float(event.y) - marker_y) <= 18.0:
+                self._junction_dragging = True
+                self._drag_state = None
+                return
+
         self._drag_state = (
             event.xdata,
             event.ydata,
@@ -258,7 +278,23 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         )
 
     def _on_motion(self, event: Any) -> None:
-        if self._drag_state is None or event.xdata is None or event.ydata is None:
+        if event.xdata is None or event.ydata is None:
+            return
+
+        if self._junction_dragging and self._junction_marker_artist is not None:
+            self._junction_point_web = Point(float(event.xdata), float(event.ydata))
+            self._junction_marker_artist.set_offsets(
+                np.array([[float(event.xdata), float(event.ydata)]])
+            )
+            if self._junction_source_crs:
+                projected = self._from_web_mercator(
+                    self._junction_point_web, self._junction_source_crs
+                )
+                self.junction_point_changed.emit(float(projected.x), float(projected.y))
+            self.draw_idle()
+            return
+
+        if self._drag_state is None:
             return
         start_x, start_y, x_limits, y_limits = self._drag_state
         dx = event.xdata - start_x
@@ -269,6 +305,7 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
 
     def _on_release(self, _: Any) -> None:
         self._drag_state = None
+        self._junction_dragging = False
 
     @staticmethod
     def _plot_geometry(ax: Any, geometry: Any, **kwargs: Any) -> None:
@@ -344,6 +381,14 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         if geometry is None or geometry.is_empty:
             return geometry
         return shapely_transform(self._transformer(source_crs).transform, geometry)
+
+    def _from_web_mercator(self, geometry: Any, target_crs: str) -> Any:
+        if geometry is None or geometry.is_empty:
+            return geometry
+        transformer = Transformer.from_crs(
+            WEB_MERCATOR_CRS, target_crs, always_xy=True
+        )
+        return shapely_transform(transformer.transform, geometry)
 
     @staticmethod
     def _tile_x(meters_x: float, zoom: int) -> float:
@@ -605,10 +650,146 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._pending_basemap_bounds = None
         self._current_pipeline = None
         self._basemap_enabled = False
+        self._junction_marker_artist = None
+        self._junction_point_web = None
+        self._junction_source_crs = None
+        self._junction_dragging = False
 
         self._cancel_tile_requests()
         self._remove_basemap_artists()
         self._basemap_cache.clear()
+
+    def draw_junction(
+        self,
+        pipeline: Any,
+        proposal: Any,
+        include_basemap: bool = True,
+    ) -> None:
+        """Draw one multi-road junction and expose its shared point for dragging."""
+        if self._shutting_down:
+            return
+        self._draw_token += 1
+        token = self._draw_token
+        self._basemap_refresh_timer.stop()
+        self._pending_basemap_bounds = None
+        self._current_pipeline = pipeline
+        self._basemap_enabled = bool(include_basemap)
+        self._cancel_tile_requests()
+
+        source_crs = pipeline.config.target_crs
+        junction = Point(float(proposal.junction_x), float(proposal.junction_y))
+        members = list(proposal.members)
+        member_geometries = [pipeline.junction_member_geometry(member) for member in members]
+        contacts = [member.contact_point for member in members]
+        target_view = self._square_bounds(member_geometries + contacts + [junction])
+
+        web_geometries = [
+            self._to_web_mercator(geometry, source_crs)
+            for geometry in member_geometries
+        ]
+        web_contacts = [
+            self._to_web_mercator(contact, source_crs) for contact in contacts
+        ]
+        junction_web = self._to_web_mercator(junction, source_crs)
+        web_view = self._square_bounds(
+            web_geometries + web_contacts + [junction_web], minimum_padding=20.0
+        )
+
+        ax = self.axes
+        self._suspend_view_refresh = True
+        self._remove_basemap_artists()
+        ax.clear()
+        self._junction_marker_artist = None
+        self._junction_point_web = junction_web
+        self._junction_source_crs = source_crs
+        ax.set_xlim(web_view[0], web_view[2])
+        ax.set_ylim(web_view[1], web_view[3])
+        ax.set_aspect("equal")
+
+        for layer in pipeline.context_layers():
+            visible = self._visible_roads(layer, target_view)
+            for road_geometry in visible.geometry:
+                web_geometry = self._to_web_mercator(road_geometry, source_crs)
+                self._plot_geometry(
+                    ax,
+                    web_geometry,
+                    color="#57450F",
+                    linewidth=1.15,
+                    alpha=0.75,
+                    zorder=2,
+                )
+
+        for member, geometry_web, contact_web in zip(
+            members, web_geometries, web_contacts
+        ):
+            selected = bool(member.selected)
+            if not selected:
+                color = "#8a8a8a"
+            else:
+                color = "#2f5cff" if int(member.county_index) == 1 else "#f0a128"
+            self._plot_geometry(
+                ax,
+                geometry_web,
+                color=color,
+                linewidth=4.0 if selected else 2.2,
+                alpha=0.72 if selected else 0.45,
+                zorder=5 if selected else 4,
+            )
+            ax.scatter(
+                contact_web.x,
+                contact_web.y,
+                s=55 if selected else 35,
+                color=("#e74c3c" if int(member.county_index) == 1 else "#39a852")
+                if selected
+                else "#8a8a8a",
+                edgecolor="black",
+                linewidth=0.7,
+                alpha=0.70,
+                zorder=7,
+            )
+            if selected:
+                ax.plot(
+                    [contact_web.x, junction_web.x],
+                    [contact_web.y, junction_web.y],
+                    color="black",
+                    linewidth=1.2,
+                    linestyle="--",
+                    alpha=0.65,
+                    zorder=6,
+                )
+
+        self._junction_marker_artist = ax.scatter(
+            junction_web.x,
+            junction_web.y,
+            s=180,
+            marker="X",
+            color="limegreen",
+            edgecolor="black",
+            linewidth=1.1,
+            zorder=9,
+        )
+
+        ax.set_title(
+            f"{proposal.junction_id} — drag the green X to set the shared junction"
+        )
+        ax.grid(True, alpha=0.50)
+        ax.set_xlabel("Web Mercator X coordinate (meters)")
+        ax.set_ylabel("Web Mercator Y coordinate (meters)")
+        x_formatter = ScalarFormatter(useOffset=False)
+        y_formatter = ScalarFormatter(useOffset=False)
+        x_formatter.set_scientific(False)
+        y_formatter.set_scientific(False)
+        ax.xaxis.set_major_formatter(x_formatter)
+        ax.yaxis.set_major_formatter(y_formatter)
+        ax.set_xlim(web_view[0], web_view[2])
+        ax.set_ylim(web_view[1], web_view[3])
+        ax.set_aspect("equal")
+
+        self._suspend_view_refresh = False
+        self._connect_view_limit_callbacks()
+        self.draw_idle()
+        if include_basemap:
+            self._schedule_basemap(token, web_view, pipeline)
 
     def draw_pair(
         self, pipeline: Any, plan_row: Any, include_basemap: bool = True
@@ -624,6 +805,10 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._basemap_enabled = bool(include_basemap)
 
         self._cancel_tile_requests()
+        self._junction_marker_artist = None
+        self._junction_point_web = None
+        self._junction_source_crs = None
+        self._junction_dragging = False
 
         pair = pipeline.pair_features(
             plan_row["county_1_id"], plan_row["county_2_id"]

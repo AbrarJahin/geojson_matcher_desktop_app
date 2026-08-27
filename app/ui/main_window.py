@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 
 from app.core.pipeline import FinalizationResult, PipelineConfig, RoadMatchingPipeline
 from app.ui.review_dialog import ManualReviewDialog
-from app.workers.tasks import AnalysisWorker, FinalizationWorker
+from app.workers.tasks import AnalysisWorker, FinalizationWorker, JunctionRoundWorker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -299,6 +299,7 @@ class MainWindow(QMainWindow):
         pipeline.set_logger(self._append_log)
         self.pipeline = pipeline
         summary = pipeline.review_summary()
+        junctions = pipeline.junction_review_summary()
         session_text = (
             f"Loaded session: {pipeline.loaded_session_path}"
             if pipeline.loaded_session_path is not None
@@ -308,28 +309,31 @@ class MainWindow(QMainWindow):
             f"Candidate pairs: {summary['total_candidates']} | "
             f"Safely rejected: {summary['safe_rejected']} "
             f"({summary['safe_reject_fraction']:.2%}) | "
-            f"Manual review: {summary['selected']} "
-            f"({summary['selected_fraction']:.2%}) | "
-            f"Completed: {summary['completed']} | Remaining: {summary['remaining']}<br>"
+            f"MANUAL_REVIEW pair evidence: {summary['selected']}<br>"
+            f"Junction round {junctions['round']}: {junctions['selected']} shown | "
+            f"Completed: {junctions['completed']} | Remaining: {junctions['remaining']} | "
+            f"Deferred conflicts: {junctions['deferred']}<br>"
             f"Safe thresholds — global: {summary['global_threshold']:.6f}, "
             f"parallel: {summary['parallel_threshold']:.6f}, "
             f"near-90°: {summary['orthogonal_threshold']:.6f}<br>{session_text}"
         )
         self._set_busy(False, "Analysis complete.")
-        self.review_button.setEnabled(summary["selected"] > 0)
+        self.review_button.setEnabled(junctions["selected"] > 0)
         QMessageBox.information(
             self,
             "Processing complete",
-            f"Processing generated {summary['total_candidates']:,} candidate pairs.\n\n"
+            f"Processing generated {summary['total_candidates']:,} pair candidates.\n\n"
             f"Safely rejected: {summary['safe_rejected']:,} "
             f"({summary['safe_reject_fraction']:.2%})\n"
-            f"Require manual review: {summary['selected']:,} "
-            f"({summary['selected_fraction']:.2%})\n\n"
-            "All pairs that were not safely rejected will now be shown in the "
-            "existing verification map.",
+            f"Pair evidence requiring human handling: {summary['selected']:,}\n\n"
+            f"Junction round {junctions['round']} contains {junctions['selected']:,} "
+            "non-overlapping junctions. Each road appears in at most one junction "
+            "during this round."
         )
-        if summary["remaining"] > 0:
+        if junctions["remaining"] > 0:
             self._open_review()
+        elif junctions["selected"] > 0:
+            self._start_junction_round_completion()
         else:
             self._start_finalization()
 
@@ -342,6 +346,26 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dialog.exec()
+
+        if callable(getattr(self.pipeline, "junction_review_summary", None)):
+            junctions = self.pipeline.junction_review_summary()
+            pair_summary = self.pipeline.review_summary()
+            self.summary_label.setText(
+                f"Candidate pairs: {pair_summary['total_candidates']} | "
+                f"Safely rejected: {pair_summary['safe_rejected']} "
+                f"({pair_summary['safe_reject_fraction']:.2%})<br>"
+                f"Junction round {junctions['round']}: {junctions['selected']} shown | "
+                f"Completed: {junctions['completed']} | Remaining: {junctions['remaining']} | "
+                f"Deferred: {junctions['deferred']}<br>"
+                f"Junction state: {self.pipeline.junction_state_path()}"
+            )
+            if junctions["remaining"] == 0 and junctions["selected"] > 0:
+                self._start_junction_round_completion()
+            elif junctions["selected"] == 0:
+                self._start_finalization()
+            return
+
+        # Backward-compatible path for older/fake pipelines used by tests.
         summary = self.pipeline.review_summary()
         self.summary_label.setText(
             f"Candidate pairs: {summary['total_candidates']} | "
@@ -358,17 +382,78 @@ class MainWindow(QMainWindow):
         if summary["remaining"] == 0:
             self._start_finalization()
 
+    def _start_junction_round_completion(self) -> None:
+        if self.pipeline is None:
+            return
+        junctions = self.pipeline.junction_review_summary()
+        if junctions["remaining"] > 0:
+            QMessageBox.warning(
+                self,
+                "Junction review incomplete",
+                f"{junctions['remaining']} junction(s) remain unanswered in this round.",
+            )
+            return
+        if junctions["selected"] == 0:
+            self._start_finalization()
+            return
+        self._set_busy(True, f"Applying junction round {junctions['round']}...")
+        thread = QThread(self)
+        worker = JunctionRoundWorker(self.pipeline)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.log.connect(self._append_log)
+        worker.stage.connect(self._analysis_stage)
+        worker.completed.connect(self._junction_round_completed)
+        worker.failed.connect(self._task_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._background_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _junction_round_completed(self, result: Any) -> None:
+        if self.pipeline is None:
+            return
+        self.pipeline.set_logger(self._append_log)
+        junctions = self.pipeline.junction_review_summary()
+        self._set_busy(False, f"Junction round {result.completed_round} completed.")
+        self.summary_label.setText(
+            f"Round {result.completed_round}: accepted {result.accepted_junctions}, "
+            f"rejected {result.rejected_junctions}. "
+            f"Geometry changed: {'yes' if result.geometry_changed else 'no'}.<br>"
+            f"Round {junctions['round']}: {junctions['selected']} junction(s) ready; "
+            f"deferred conflicts: {junctions['deferred']}."
+        )
+        if junctions["selected"] > 0:
+            QTimer.singleShot(0, self._open_review)
+        else:
+            QTimer.singleShot(0, self._start_finalization)
+
     def _start_finalization(self) -> None:
         if self.pipeline is None:
             return
-        summary = self.pipeline.review_summary()
-        if summary["remaining"] > 0:
-            QMessageBox.warning(
-                self,
-                "Manual review incomplete",
-                f"{summary['remaining']} pairs remain unanswered.",
-            )
-            return
+        if callable(getattr(self.pipeline, "junction_review_summary", None)):
+            junctions = self.pipeline.junction_review_summary()
+            if junctions["remaining"] > 0 or junctions["selected"] > 0:
+                QMessageBox.warning(
+                    self,
+                    "Junction review incomplete",
+                    "The current junction round must be fully reviewed and committed "
+                    "before final outputs are created.",
+                )
+                return
+        else:
+            summary = self.pipeline.review_summary()
+            if summary["remaining"] > 0:
+                QMessageBox.warning(
+                    self,
+                    "Manual review incomplete",
+                    f"{summary['remaining']} pairs remain unanswered.",
+                )
+                return
         self._set_busy(True, "Creating final GeoJSON files and audit CSVs...")
         LOGGER.info("Starting final output creation.")
         thread = QThread(self)
