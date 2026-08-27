@@ -27,6 +27,15 @@ TILE_SIZE = 256
 MAX_TILE_REQUESTS = 16
 BASEMAP_VIEW_REFRESH_INTERVAL_MS = 5_000
 
+# County colors use related hue families so county identity remains obvious,
+# while active/current-junction roads remain visually stronger than context.
+COUNTY_1_ACTIVE_COLOR = "#0057B8"
+COUNTY_1_CONTEXT_COLOR = "#324770"
+COUNTY_2_ACTIVE_COLOR = "#D95F02"
+COUNTY_2_CONTEXT_COLOR = "#D9B28D"
+ACTIVE_ROAD_ALPHA = 0.90
+CONTEXT_ROAD_ALPHA = 0.70
+
 class InteractiveMapCanvas(FigureCanvasQTAgg):
     junction_point_changed = Signal(float, float)
     """Matplotlib road review map with non-blocking Qt-native tile requests.
@@ -54,6 +63,8 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._junction_drag_enabled = False
         self._junction_preview_sources: dict[str, dict[str, Any]] = {}
         self._junction_connector_artists: dict[str, Any] = {}
+        self._hover_roads: list[tuple[Any, str]] = []
+        self._hover_annotation: Any | None = None
         self._draw_token = 0
         self._shutting_down = False
         self._transformers: dict[str, Transformer] = {}
@@ -304,6 +315,8 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
 
     def _on_motion(self, event: Any) -> None:
         if event.xdata is None or event.ydata is None:
+            if not self._junction_dragging and self._drag_state is None:
+                self._update_road_hover(event)
             return
 
         if self._junction_dragging and self._junction_marker_artist is not None:
@@ -321,6 +334,7 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             return
 
         if self._drag_state is None:
+            self._update_road_hover(event)
             return
         start_x, start_y, x_limits, y_limits = self._drag_state
         dx = event.xdata - start_x
@@ -328,6 +342,71 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self.axes.set_xlim(x_limits[0] - dx, x_limits[1] - dx)
         self.axes.set_ylim(y_limits[0] - dy, y_limits[1] - dy)
         self.draw_idle()
+
+    def _reset_road_hover(self) -> None:
+        """Clear road-hover artists before a complete map redraw."""
+
+        self._hover_roads = []
+        self._hover_annotation = None
+
+    def _register_road_hover(self, artists: list[Any], county_name: str) -> None:
+        """Register plotted road lines for a lightweight county-name tooltip."""
+
+        label = str(county_name).strip() or "County"
+        for artist in artists:
+            # A slightly generous pick radius makes thin context roads practical
+            # to hover without changing their visible line width.
+            artist.set_pickradius(6.0)
+            self._hover_roads.append((artist, label))
+
+    def _ensure_hover_annotation(self) -> Any:
+        if self._hover_annotation is None:
+            self._hover_annotation = self.axes.annotate(
+                "",
+                xy=(0.0, 0.0),
+                xytext=(10, 10),
+                textcoords="offset points",
+                bbox={
+                    "boxstyle": "round,pad=0.3",
+                    "fc": "#202020",
+                    "ec": "#f0f0f0",
+                    "alpha": 0.92,
+                },
+                color="white",
+                fontsize=9,
+                zorder=30,
+            )
+            self._hover_annotation.set_visible(False)
+        return self._hover_annotation
+
+    def _update_road_hover(self, event: Any) -> None:
+        """Show the county name when the pointer is over any displayed road."""
+
+        annotation = self._ensure_hover_annotation()
+        if event.inaxes is not self.axes or event.xdata is None or event.ydata is None:
+            if annotation.get_visible():
+                annotation.set_visible(False)
+                self.draw_idle()
+            return
+
+        # Reverse plot order so thick/current-junction roads win when an active
+        # road is drawn over the same context geometry.
+        for artist, county_name in reversed(self._hover_roads):
+            try:
+                contains, _ = artist.contains(event)
+            except (AttributeError, RuntimeError, ValueError):
+                continue
+            if not contains:
+                continue
+            annotation.xy = (float(event.xdata), float(event.ydata))
+            annotation.set_text(county_name)
+            annotation.set_visible(True)
+            self.draw_idle()
+            return
+
+        if annotation.get_visible():
+            annotation.set_visible(False)
+            self.draw_idle()
 
     def _on_release(self, _: Any) -> None:
         self._drag_state = None
@@ -729,6 +808,7 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._junction_dragging = False
         self._junction_preview_sources = {}
         self._junction_connector_artists = {}
+        self._reset_road_hover()
 
         self._cancel_tile_requests()
         self._remove_basemap_artists()
@@ -774,6 +854,7 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._suspend_view_refresh = True
         self._remove_basemap_artists()
         ax.clear()
+        self._reset_road_hover()
         self._junction_marker_artist = None
         self._junction_point_web = junction_web
         self._junction_source_crs = source_crs
@@ -783,18 +864,25 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         ax.set_ylim(web_view[1], web_view[3])
         ax.set_aspect("equal")
 
-        for layer in pipeline.context_layers():
+        county_context_styles = (
+            (pipeline.county_1_name, COUNTY_1_CONTEXT_COLOR),
+            (pipeline.county_2_name, COUNTY_2_CONTEXT_COLOR),
+        )
+        for layer, (county_name, context_color) in zip(
+            pipeline.context_layers(), county_context_styles
+        ):
             visible = self._visible_roads(layer, target_view)
             for road_geometry in visible.geometry:
                 web_geometry = self._to_web_mercator(road_geometry, source_crs)
-                self._plot_geometry(
+                artists = self._plot_geometry(
                     ax,
                     web_geometry,
-                    color="#57450F",
+                    color=context_color,
                     linewidth=1.15,
-                    alpha=0.75,
+                    alpha=CONTEXT_ROAD_ALPHA,
                     zorder=2,
                 )
+                self._register_road_hover(artists, county_name)
 
         for member, geometry, contact_web in zip(
             members, member_geometries, web_contacts
@@ -804,7 +892,11 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
                 color = "#8a8a8a"
                 display_geometry = geometry
             else:
-                color = "#2f5cff" if int(member.county_index) == 1 else "#f0a128"
+                color = (
+                    COUNTY_1_ACTIVE_COLOR
+                    if int(member.county_index) == 1
+                    else COUNTY_2_ACTIVE_COLOR
+                )
                 try:
                     display_geometry, _ = update_member_geometry(
                         geometry, member, junction
@@ -818,9 +910,15 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
                 geometry_web,
                 color=color,
                 linewidth=4.0 if selected else 2.2,
-                alpha=0.82 if selected else 0.45,
+                alpha=ACTIVE_ROAD_ALPHA if selected else 0.45,
                 zorder=5 if selected else 4,
             )
+            county_name = (
+                pipeline.county_1_name
+                if int(member.county_index) == 1
+                else pipeline.county_2_name
+            )
+            self._register_road_hover(artists, county_name)
             ax.scatter(
                 contact_web.x,
                 contact_web.y,
@@ -937,22 +1035,30 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._suspend_view_refresh = True
         self._remove_basemap_artists()
         ax.clear()
+        self._reset_road_hover()
         ax.set_xlim(web_view[0], web_view[2])
         ax.set_ylim(web_view[1], web_view[3])
         ax.set_aspect("equal")
 
-        for layer in pipeline.context_layers():
+        county_context_styles = (
+            (pipeline.county_1_name, COUNTY_1_CONTEXT_COLOR),
+            (pipeline.county_2_name, COUNTY_2_CONTEXT_COLOR),
+        )
+        for layer, (county_name, context_color) in zip(
+            pipeline.context_layers(), county_context_styles
+        ):
             visible = self._visible_roads(layer, target_view)
             for road_geometry in visible.geometry:
                 web_geometry = self._to_web_mercator(road_geometry, source_crs)
-                self._plot_geometry(
+                artists = self._plot_geometry(
                     ax,
                     web_geometry,
-                    color="#57450F",
+                    color=context_color,
                     linewidth=1.25,
-                    alpha=0.95,
+                    alpha=CONTEXT_ROAD_ALPHA,
                     zorder=2,
                 )
+                self._register_road_hover(artists, county_name)
 
         name_1 = str(
             pair.get("full_road_label_county1")
@@ -964,22 +1070,24 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
             or pair.get("road_name_county2")
             or plan_row["county_2_id"]
         )
-        self._plot_geometry(
+        county_1_artists = self._plot_geometry(
             ax,
             geometry_1_web,
-            color="blue",
+            color=COUNTY_1_ACTIVE_COLOR,
             linewidth=4.0,
-            alpha=0.50,
+            alpha=ACTIVE_ROAD_ALPHA,
             zorder=5,
         )
-        self._plot_geometry(
+        self._register_road_hover(county_1_artists, pipeline.county_1_name)
+        county_2_artists = self._plot_geometry(
             ax,
             geometry_2_web,
-            color="orange",
+            color=COUNTY_2_ACTIVE_COLOR,
             linewidth=4.0,
-            alpha=0.50,
+            alpha=ACTIVE_ROAD_ALPHA,
             zorder=5,
         )
+        self._register_road_hover(county_2_artists, pipeline.county_2_name)
         ax.plot(
             [contact_1_web.x, contact_2_web.x],
             [contact_1_web.y, contact_2_web.y],

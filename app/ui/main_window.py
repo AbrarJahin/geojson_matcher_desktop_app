@@ -74,8 +74,9 @@ class MainWindow(QMainWindow):
         self.review_button.setEnabled(False)
 
         self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
+        self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        self.progress.setFormat("%p%")
         self.status_label = QLabel("Select two GeoJSON files to begin.")
         self.summary_label = QLabel()
         self.summary_label.setWordWrap(True)
@@ -265,9 +266,12 @@ class MainWindow(QMainWindow):
         self.analyze_button.setEnabled(not busy)
         self.review_button.setEnabled(not busy and self.pipeline is not None)
         self.quit_button.setEnabled(not busy)
-        self.progress.setRange(0, 0 if busy else 1)
-        if not busy:
-            self.progress.setValue(1)
+        # Keep the main progress indicator determinate. Analysis workers already
+        # report retained-pipeline stages; those are translated to a percentage
+        # in _analysis_stage() without exposing internal notebook-cell filenames.
+        self.progress.setRange(0, 100)
+        self.progress.setFormat("%p%")
+        self.progress.setValue(0 if busy else 100)
         self.status_label.setText(status)
 
     def _append_log(self, message: str) -> None:
@@ -310,7 +314,15 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _analysis_stage(self, position: int, total: int, filename: str) -> None:
-        self.status_label.setText(f"Analysis stage {position} of {total}: {filename}")
+        # The embedded pipeline reports a stage immediately before executing it.
+        # Therefore position - 1 stages are definitely complete at this point.
+        # Completion handlers set the bar to 100% after the final stage finishes.
+        stage_total = max(int(total), 1)
+        completed_stages = max(min(int(position) - 1, stage_total), 0)
+        percent = min(99, int(round((completed_stages / stage_total) * 100)))
+        self.progress.setRange(0, 100)
+        self.progress.setValue(percent)
+        self.status_label.setText(f"Analyzing road data... {percent}% complete")
 
     def _analysis_completed(self, pipeline: RoadMatchingPipeline) -> None:
         pipeline.set_logger(self._append_log)
