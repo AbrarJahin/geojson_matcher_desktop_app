@@ -15,19 +15,23 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash -el {0}
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
-      - name: Set up Miniforge
+      - name: Set up Conda
         uses: conda-incubator/setup-miniconda@v4
         with:
-          miniforge-version: latest
           activate-environment: ""
-          auto-activate: false
+          auto-activate: true
+          miniconda-version: latest
 
-      - name: Create project environment
+      - name: Set up project environment
         run: make setup
 
       - name: Run existing tests
