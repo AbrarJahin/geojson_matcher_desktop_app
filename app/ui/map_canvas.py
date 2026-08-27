@@ -13,10 +13,12 @@ from matplotlib.ticker import ScalarFormatter
 from PySide6.QtCore import QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QToolButton, QWidget
 from pyproj import Transformer
 from shapely.geometry import Point, box
 from shapely.ops import transform as shapely_transform
+
+from app.core.junctions import update_member_geometry
 
 WEB_MERCATOR_CRS = "EPSG:3857"
 WEB_MERCATOR_HALF_WORLD = 20037508.342789244
@@ -49,6 +51,9 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._junction_marker_artist: Any | None = None
         self._junction_point_web: Point | None = None
         self._junction_source_crs: str | None = None
+        self._junction_drag_enabled = False
+        self._junction_preview_sources: dict[str, dict[str, Any]] = {}
+        self._junction_connector_artists: dict[str, Any] = {}
         self._draw_token = 0
         self._shutting_down = False
         self._transformers: dict[str, Transformer] = {}
@@ -90,6 +95,21 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
     def _toolbar_is_active(self) -> bool:
         toolbar = getattr(self, "toolbar", None)
         return bool(toolbar and getattr(toolbar, "mode", ""))
+
+    def set_junction_drag_enabled(self, enabled: bool) -> None:
+        """Enable or disable the dedicated shared-junction drag interaction."""
+
+        self._junction_drag_enabled = bool(enabled)
+        self._drag_state = None
+        self._junction_dragging = False
+        if self._junction_drag_enabled:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
+
+    @property
+    def junction_drag_enabled(self) -> bool:
+        return bool(self._junction_drag_enabled)
 
     def _connect_view_limit_callbacks(self) -> None:
         """Observe zoom, pan, Home, Back, and Forward viewport changes.
@@ -248,27 +268,32 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self.draw_idle()
 
     def _on_press(self, event: Any) -> None:
-        if (
-            event.button != 1
-            or event.xdata is None
-            or event.ydata is None
-            or self._toolbar_is_active()
-        ):
+        if event.button != 1 or event.xdata is None or event.ydata is None:
             return
 
-        if (
-            self._junction_marker_artist is not None
-            and self._junction_point_web is not None
-            and event.x is not None
-            and event.y is not None
-        ):
-            marker_x, marker_y = self.axes.transData.transform(
-                (self._junction_point_web.x, self._junction_point_web.y)
-            )
-            if math.hypot(float(event.x) - marker_x, float(event.y) - marker_y) <= 18.0:
-                self._junction_dragging = True
-                self._drag_state = None
-                return
+        # The dedicated junction tool owns left-drag while it is active.  This
+        # makes the interaction deterministic even after checkboxes/buttons are
+        # used, and gives Pan/Zoom their own explicit toolbar modes.
+        if self._junction_drag_enabled:
+            if (
+                self._junction_marker_artist is not None
+                and self._junction_point_web is not None
+                and event.x is not None
+                and event.y is not None
+            ):
+                marker_x, marker_y = self.axes.transData.transform(
+                    (self._junction_point_web.x, self._junction_point_web.y)
+                )
+                if (
+                    math.hypot(float(event.x) - marker_x, float(event.y) - marker_y)
+                    <= 18.0
+                ):
+                    self._junction_dragging = True
+                    self._drag_state = None
+            return
+
+        if self._toolbar_is_active():
+            return
 
         self._drag_state = (
             event.xdata,
@@ -290,6 +315,7 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
                 projected = self._from_web_mercator(
                     self._junction_point_web, self._junction_source_crs
                 )
+                self._update_junction_preview(projected)
                 self.junction_point_changed.emit(float(projected.x), float(projected.y))
             self.draw_idle()
             return
@@ -308,24 +334,71 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._junction_dragging = False
 
     @staticmethod
-    def _plot_geometry(ax: Any, geometry: Any, **kwargs: Any) -> None:
+    def _plot_geometry(ax: Any, geometry: Any, **kwargs: Any) -> list[Any]:
         if geometry is None or geometry.is_empty:
-            return
+            return []
         if geometry.geom_type == "LineString":
             parts = [geometry]
         elif geometry.geom_type == "MultiLineString":
             parts = list(geometry.geoms)
         else:
-            return
+            return []
         label = kwargs.pop("label", None)
+        artists: list[Any] = []
         for index, part in enumerate(parts):
             x_values, y_values = part.xy
-            ax.plot(
+            line = ax.plot(
                 x_values,
                 y_values,
                 label=label if index == 0 else None,
                 **kwargs,
-            )
+            )[0]
+            artists.append(line)
+        return artists
+
+    @staticmethod
+    def _geometry_parts(geometry: Any) -> list[Any]:
+        if geometry is None or geometry.is_empty:
+            return []
+        if geometry.geom_type == "LineString":
+            return [geometry]
+        if geometry.geom_type == "MultiLineString":
+            return list(geometry.geoms)
+        return []
+
+    def _update_junction_preview(self, junction_projected: Point) -> None:
+        """Move all selected-road preview geometries to the dragged junction."""
+
+        if not self._junction_source_crs or self._junction_point_web is None:
+            return
+
+        for member_key, source in self._junction_preview_sources.items():
+            member = source["member"]
+            original_geometry = source["geometry"]
+            artists = source["artists"]
+            try:
+                preview_geometry, _ = update_member_geometry(
+                    original_geometry, member, junction_projected
+                )
+                preview_web = self._to_web_mercator(
+                    preview_geometry, self._junction_source_crs
+                )
+            except Exception:
+                continue
+
+            parts = self._geometry_parts(preview_web)
+            if len(parts) == len(artists):
+                for artist, part in zip(artists, parts):
+                    x_values, y_values = part.xy
+                    artist.set_data(x_values, y_values)
+
+            connector = self._junction_connector_artists.get(member_key)
+            contact_web = source.get("contact_web")
+            if connector is not None and contact_web is not None:
+                connector.set_data(
+                    [contact_web.x, self._junction_point_web.x],
+                    [contact_web.y, self._junction_point_web.y],
+                )
 
     @staticmethod
     def _visible_roads(
@@ -654,6 +727,8 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._junction_point_web = None
         self._junction_source_crs = None
         self._junction_dragging = False
+        self._junction_preview_sources = {}
+        self._junction_connector_artists = {}
 
         self._cancel_tile_requests()
         self._remove_basemap_artists()
@@ -702,6 +777,8 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._junction_marker_artist = None
         self._junction_point_web = junction_web
         self._junction_source_crs = source_crs
+        self._junction_preview_sources = {}
+        self._junction_connector_artists = {}
         ax.set_xlim(web_view[0], web_view[2])
         ax.set_ylim(web_view[1], web_view[3])
         ax.set_aspect("equal")
@@ -719,20 +796,29 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
                     zorder=2,
                 )
 
-        for member, geometry_web, contact_web in zip(
-            members, web_geometries, web_contacts
+        for member, geometry, contact_web in zip(
+            members, member_geometries, web_contacts
         ):
             selected = bool(member.selected)
             if not selected:
                 color = "#8a8a8a"
+                display_geometry = geometry
             else:
                 color = "#2f5cff" if int(member.county_index) == 1 else "#f0a128"
-            self._plot_geometry(
+                try:
+                    display_geometry, _ = update_member_geometry(
+                        geometry, member, junction
+                    )
+                except Exception:
+                    display_geometry = geometry
+
+            geometry_web = self._to_web_mercator(display_geometry, source_crs)
+            artists = self._plot_geometry(
                 ax,
                 geometry_web,
                 color=color,
                 linewidth=4.0 if selected else 2.2,
-                alpha=0.72 if selected else 0.45,
+                alpha=0.82 if selected else 0.45,
                 zorder=5 if selected else 4,
             )
             ax.scatter(
@@ -748,15 +834,22 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
                 zorder=7,
             )
             if selected:
-                ax.plot(
+                connector = ax.plot(
                     [contact_web.x, junction_web.x],
                     [contact_web.y, junction_web.y],
                     color="black",
-                    linewidth=1.2,
+                    linewidth=1.0,
                     linestyle="--",
-                    alpha=0.65,
+                    alpha=0.40,
                     zorder=6,
-                )
+                )[0]
+                self._junction_preview_sources[member.key] = {
+                    "member": member,
+                    "geometry": geometry,
+                    "artists": artists,
+                    "contact_web": contact_web,
+                }
+                self._junction_connector_artists[member.key] = connector
 
         self._junction_marker_artist = ax.scatter(
             junction_web.x,
@@ -809,6 +902,8 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
         self._junction_point_web = None
         self._junction_source_crs = None
         self._junction_dragging = False
+        self._junction_preview_sources = {}
+        self._junction_connector_artists = {}
 
         pair = pipeline.pair_features(
             plan_row["county_1_id"], plan_row["county_2_id"]
@@ -949,8 +1044,65 @@ class InteractiveMapCanvas(FigureCanvasQTAgg):
 
 
 class MapNavigationToolbar(NavigationToolbar2QT):
+    # Home/Back/Forward are intentionally omitted.  Junction review has a
+    # dedicated editing mode, while Pan/Zoom/Save remain available explicitly.
     toolitems = tuple(
         item
         for item in NavigationToolbar2QT.toolitems
-        if item[0] in {"Home", "Back", "Forward", "Pan", "Zoom", "Save"}
+        if item[0] in {"Pan", "Zoom", "Save"}
     )
+
+    def __init__(self, canvas: InteractiveMapCanvas, parent: QWidget | None = None):
+        super().__init__(canvas, parent)
+        self.drag_junction_button = QToolButton(self)
+        self.drag_junction_button.setText("Drag Junction")
+        self.drag_junction_button.setToolTip(
+            "Select the green X and drag it to preview the shared junction."
+        )
+        self.drag_junction_button.setCheckable(True)
+        self.drag_junction_button.setChecked(True)
+        first_action = self.actions()[0] if self.actions() else None
+        self._drag_junction_action = self.insertWidget(
+            first_action, self.drag_junction_button
+        )
+        if first_action is not None:
+            self.insertSeparator(first_action)
+        self.drag_junction_button.toggled.connect(self._set_junction_drag_mode)
+        self._set_junction_drag_mode(True)
+
+    @property
+    def junction_drag_enabled(self) -> bool:
+        return bool(self.drag_junction_button.isChecked())
+
+    def set_junction_mode_available(self, available: bool) -> None:
+        self._drag_junction_action.setVisible(bool(available))
+        self.drag_junction_button.setVisible(bool(available))
+        if not available:
+            self.drag_junction_button.setChecked(False)
+
+    def _set_button_checked(self, checked: bool) -> None:
+        self.drag_junction_button.blockSignals(True)
+        self.drag_junction_button.setChecked(bool(checked))
+        self.drag_junction_button.blockSignals(False)
+
+    def _set_junction_drag_mode(self, enabled: bool) -> None:
+        if enabled:
+            pan_action = self._actions.get("pan")
+            zoom_action = self._actions.get("zoom")
+            if pan_action is not None and pan_action.isChecked():
+                super().pan()
+            if zoom_action is not None and zoom_action.isChecked():
+                super().zoom()
+        self.canvas.set_junction_drag_enabled(bool(enabled))
+
+    def pan(self, *args: Any) -> None:
+        if self.drag_junction_button.isChecked():
+            self._set_button_checked(False)
+            self.canvas.set_junction_drag_enabled(False)
+        super().pan(*args)
+
+    def zoom(self, *args: Any) -> None:
+        if self.drag_junction_button.isChecked():
+            self._set_button_checked(False)
+            self.canvas.set_junction_drag_enabled(False)
+        super().zoom(*args)

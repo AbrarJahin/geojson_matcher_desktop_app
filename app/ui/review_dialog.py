@@ -51,6 +51,9 @@ class ManualReviewDialog(QDialog):
 
     def __init__(self, pipeline: Any, include_basemap: bool = True, parent: Any = None):
         super().__init__(parent)
+        application = QApplication.instance()
+        if application is not None and not application.windowIcon().isNull():
+            self.setWindowIcon(application.windowIcon())
         self.pipeline = pipeline
         self._junction_mode = callable(getattr(pipeline, "junction_review_items", None))
         self._changing_pair = False
@@ -78,6 +81,7 @@ class ManualReviewDialog(QDialog):
         )
         self.toolbar = MapNavigationToolbar(self.canvas, self)
         self.canvas.toolbar = self.toolbar
+        self.toolbar.set_junction_mode_available(self._junction_mode)
         self.canvas.junction_point_changed.connect(self._junction_point_moved)
 
         self.position_label = QLabel()
@@ -447,8 +451,10 @@ class ManualReviewDialog(QDialog):
             f"<b>Junction point:</b> {proposal.junction_x:.3f}, {proposal.junction_y:.3f}"
         )
         self.reason_label.setText(
-            "<b>Review action:</b><br>Toggle roads that should participate, drag the "
-            "green X to the correct shared junction, then Accept or Reject the junction."
+            "<b>Review action:</b><br>Toggle roads that should participate, then use "
+            "<b>Drag Junction</b> (enabled by default) to move the green X. The selected "
+            "road geometry previews update live. After using Pan/Zoom, select Drag "
+            "Junction again before moving the X. Then Accept or Reject the junction."
         )
         self.policy_label.setText(self._review_policy_text())
         self.progress.setValue(completed)

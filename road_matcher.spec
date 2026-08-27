@@ -7,6 +7,9 @@ datas = []
 for package in ["geopandas", "pyproj", "matplotlib"]:
     datas += collect_data_files(package, include_py_files=False)
 
+# Application branding used by Qt at runtime.
+datas += [("app/resources/road_matcher.png", "app/resources")]
+
 binaries = []
 for package in ["pyproj", "pyogrio", "shapely"]:
     binaries += collect_dynamic_libs(package)
@@ -52,6 +55,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="RoadMatcher",
+    icon="app/resources/road_matcher.ico",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

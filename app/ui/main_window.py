@@ -4,9 +4,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSettings, QThread, QTimer, QUrl
+from PySide6.QtCore import QSettings, QThread, QTimer, QUrl, Qt
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -36,6 +37,9 @@ LOGGER = logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        application = QApplication.instance()
+        if application is not None and not application.windowIcon().isNull():
+            self.setWindowIcon(application.windowIcon())
         self.setWindowTitle("Two-GeoJSON Road Matcher")
         self.resize(1000, 760)
         self.pipeline: RoadMatchingPipeline | None = None
@@ -89,6 +93,19 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         layout = QVBoxLayout(central)
+
+        branding = QHBoxLayout()
+        logo_label = QLabel()
+        application = QApplication.instance()
+        if application is not None and not application.windowIcon().isNull():
+            logo_label.setPixmap(application.windowIcon().pixmap(48, 48))
+        logo_label.setFixedSize(52, 52)
+        title_label = QLabel("<b style='font-size:20px'>Road Matcher</b><br>Road Junction Verification")
+        title_label.setTextFormat(Qt.TextFormat.RichText)
+        branding.addWidget(logo_label)
+        branding.addWidget(title_label)
+        branding.addStretch(1)
+        layout.addLayout(branding)
         layout.addWidget(input_group)
         layout.addWidget(settings_group)
         layout.addLayout(actions)

@@ -19,6 +19,8 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
+SetupIconFile=..\app\resources\road_matcher.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]
 Source: "..\dist\RoadMatcher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
