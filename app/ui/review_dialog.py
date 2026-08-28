@@ -73,7 +73,7 @@ class ManualReviewDialog(QDialog):
         self.setWindowTitle(
             "Manual Junction Verification" if self._junction_mode else "Manual Road-Pair Verification"
         )
-        self.setSizeGripEnabled(False)
+        self.setSizeGripEnabled(True)
         self.resize(1280, 820)
 
         self.canvas = InteractiveMapCanvas(self)
@@ -197,8 +197,9 @@ class ManualReviewDialog(QDialog):
         layout.addWidget(splitter, 1)
         layout.addLayout(decisions)
 
-        # Maximize through the window manager so Windows uses availableGeometry,
-        # which excludes the taskbar/start-menu work area.
+        # Start large inside the usable work area, but do not maximize or impose
+        # a permanent maximum size. The native frame therefore remains freely
+        # resizable and can use a larger monitor after a screen move.
         QTimer.singleShot(0, self._fit_to_available_screen)
 
         if self._item_count() == 0:
@@ -304,12 +305,20 @@ class ManualReviewDialog(QDialog):
         if screen is None:
             return
         available = screen.availableGeometry()
-        self.setMaximumSize(available.size())
-        # Let the native window manager account for frame/title-bar dimensions.
-        self.showMaximized()
+        # Use most of the current work area without entering the maximized state.
+        # Keeping the default unconstrained maximum size is important: users can
+        # resize normally and can move the dialog to a larger monitor later.
+        target_width = max(1, int(available.width() * 0.92))
+        target_height = max(1, int(available.height() * 0.92))
+        self.resize(target_width, target_height)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
         self._screen_fitted = True
         LOGGER.info(
-            "Manual-review window maximized to usable screen area: %sx%s at (%s,%s).",
+            "Manual-review window fitted to usable screen area: %sx%s within %sx%s at (%s,%s).",
+            target_width,
+            target_height,
             available.width(),
             available.height(),
             available.x(),

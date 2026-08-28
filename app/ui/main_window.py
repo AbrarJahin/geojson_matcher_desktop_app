@@ -123,10 +123,36 @@ class MainWindow(QMainWindow):
         self.quit_button.clicked.connect(self.close)
 
         self._restore_settings()
-        # Resume the last valid project automatically. Analysis must run again
-        # to reconstruct notebook state before compatible saved decisions can
-        # be merged into the in-memory review queue.
-        # QTimer.singleShot(350, self._auto_start_last_project)
+        # Fit the first shown window inside the usable desktop work area (not
+        # behind the Windows taskbar), while keeping it a normal resizable
+        # window.  Then resume the last valid project as originally intended.
+        QTimer.singleShot(0, self._fit_to_available_screen)
+        QTimer.singleShot(350, self._auto_start_last_project)
+
+    def _fit_to_available_screen(self) -> None:
+        """Choose an initial geometry wholly inside the current screen work area."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        # Leave headroom for native frame/title-bar metrics and DPI rounding.
+        # This avoids a fixed 1000x760 client area extending underneath the
+        # taskbar on smaller or scaled displays.
+        target_width = min(1000, max(1, int(available.width() * 0.92)))
+        target_height = min(760, max(1, int(available.height() * 0.92)))
+        self.resize(target_width, target_height)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
+        LOGGER.info(
+            "Main window fitted to usable screen area: %sx%s within %sx%s at (%s,%s).",
+            target_width,
+            target_height,
+            available.width(),
+            available.height(),
+            available.x(),
+            available.y(),
+        )
 
     def _build_input_group(self) -> QGroupBox:
         group = QGroupBox("Local files")
@@ -252,10 +278,13 @@ class MainWindow(QMainWindow):
             self.output_edit.setText(directory)
 
     def _config(self) -> PipelineConfig:
+        output_text = self.output_edit.text().strip()
+        if not output_text:
+            raise ValueError("Select an output directory.")
         return PipelineConfig(
             county_file_1=Path(self.file_1_edit.text().strip()),
             county_file_2=Path(self.file_2_edit.text().strip()),
-            output_dir=Path(self.output_edit.text().strip()),
+            output_dir=Path(output_text),
             buffer_distance_meters=self.buffer_spin.value(),
             target_crs=self.target_crs_edit.text().strip(),
             road_id_column=self.road_id_edit.text().strip(),

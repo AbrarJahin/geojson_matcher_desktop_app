@@ -2,6 +2,7 @@
 #define MyAppVersion "1.3.0"
 #define MyAppPublisher "Road Matcher Research"
 #define MyAppExeName "RoadMatcher.exe"
+#define MyAppUserModelID "RoadMatcher.Research.Desktop"
 
 [Setup]
 AppId={{A7D9E3E3-47D4-42E3-AF4B-6335A476B97E}
@@ -26,8 +27,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Source: "..\dist\RoadMatcher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#MyAppUserModelID}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#MyAppUserModelID}"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked

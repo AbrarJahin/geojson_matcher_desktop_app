@@ -28,6 +28,8 @@ DIST_EXE = ROOT / "dist" / "RoadMatcher" / (
     "RoadMatcher.exe" if os.name == "nt" else "RoadMatcher"
 )
 INSTALLER_OUTPUT = ROOT / "installer_output" / "RoadMatcher-Setup-1.3.0.exe"
+PACKAGING_SMOKE_TEST_ARGUMENT = "--packaging-smoke-test"
+PACKAGING_SMOKE_REPORT = ROOT / "build" / "packaging-smoke-test.log"
 
 CONDA_PYTHON_VERSION = os.environ.get(
     "ROAD_MATCHER_PYTHON_VERSION", "3.12"
@@ -426,6 +428,39 @@ def verify() -> None:
     print("\nEnvironment, tests, and Python compilation checks passed.")
 
 
+def verify_frozen_application() -> None:
+    """Run the native GIS smoke test through the produced executable itself."""
+    print("\n> {0} {1}".format(DIST_EXE, PACKAGING_SMOKE_TEST_ARGUMENT), flush=True)
+    PACKAGING_SMOKE_REPORT.parent.mkdir(parents=True, exist_ok=True)
+    if PACKAGING_SMOKE_REPORT.exists():
+        PACKAGING_SMOKE_REPORT.unlink()
+    smoke_env = os.environ.copy()
+    smoke_env["ROAD_MATCHER_PACKAGING_SMOKE_REPORT"] = str(PACKAGING_SMOKE_REPORT)
+    try:
+        result = subprocess.run(
+            [str(DIST_EXE), PACKAGING_SMOKE_TEST_ARGUMENT],
+            cwd=str(ROOT),
+            env=smoke_env,
+            check=False,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "Frozen Road Matcher GIS smoke test timed out after 120 seconds."
+        ) from exc
+    if result.returncode != 0:
+        details = _tail_text_file(PACKAGING_SMOKE_REPORT, line_count=120)
+        detail_text = "" if not details else "\n\nFrozen smoke traceback:\n{0}".format(details)
+        raise RuntimeError(
+            "Frozen Road Matcher GIS smoke test failed with exit code {0}. "
+            "The packaged application cannot safely be installed; verify Pyogrio/GDAL, "
+            "PyProj, and Shapely native dependencies.{1}".format(
+                result.returncode, detail_text
+            )
+        )
+    print("Frozen GIS dependency smoke test passed.")
+
+
 def build() -> None:
     require_runtime_python()
     test()
@@ -444,6 +479,7 @@ def build() -> None:
             "Build finished but the expected executable was not found: {0}"
             .format(DIST_EXE)
         )
+    verify_frozen_application()
     print("\nStandalone application created at: {0}".format(DIST_EXE))
 
 

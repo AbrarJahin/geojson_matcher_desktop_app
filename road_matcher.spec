@@ -1,5 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import (
+    collect_all,
+    collect_data_files,
+    collect_delvewheel_libs_directory,
+    collect_dynamic_libs,
+)
 
 # Scientific/GIS packages carry CRS databases, projection grids, and native
 # libraries that must remain beside the executable.
@@ -15,11 +20,23 @@ datas += [
 ]
 
 binaries = []
-for package in ["pyproj", "pyogrio", "shapely"]:
+for package in ["pyproj", "shapely"]:
     binaries += collect_dynamic_libs(package)
 
-hiddenimports = [
-    "pyogrio._io",
+# GeoPandas loads Pyogrio dynamically.  Collect the complete package rather
+# than only pyogrio._io so its Python modules and GDAL data are retained.
+pyogrio_datas, pyogrio_binaries, pyogrio_hiddenimports = collect_all("pyogrio")
+datas += pyogrio_datas
+binaries += pyogrio_binaries
+
+# Windows wheels built with delvewheel keep dependent native DLLs in sibling
+# <package>.libs directories, outside collect_dynamic_libs()' normal scope.
+for package in ["pyogrio", "pyproj", "shapely"]:
+    datas, binaries = collect_delvewheel_libs_directory(
+        package, datas=datas, binaries=binaries
+    )
+
+hiddenimports = pyogrio_hiddenimports + [
     "sklearn.mixture._gaussian_mixture",
     "sklearn.decomposition._pca",
     "sklearn.preprocessing._data",

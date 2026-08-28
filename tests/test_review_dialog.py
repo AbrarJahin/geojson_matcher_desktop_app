@@ -180,7 +180,7 @@ def test_final_manual_decision_closes_without_intermediate_popup(
     assert all(pd.notna(value) for value in pipeline._decisions.values())
 
 
-def test_review_window_uses_available_screen_and_left_sidebar(tmp_path: Path) -> None:
+def test_review_window_uses_available_screen_and_remains_resizable(tmp_path: Path) -> None:
     app = _app()
     pipeline = FakePipeline(tmp_path)
     dialog = ManualReviewDialog(pipeline, include_basemap=False)
@@ -190,8 +190,14 @@ def test_review_window_uses_available_screen_and_left_sidebar(tmp_path: Path) ->
     app.processEvents()
 
     available = dialog.screen().availableGeometry()
-    assert dialog.maximumWidth() <= available.width()
-    assert dialog.maximumHeight() <= available.height()
+    assert dialog.isSizeGripEnabled() is True
+    assert not dialog.isMaximized()
+    # The current screen is used only for initial placement; it must not become
+    # a permanent maximum that prevents resizing or use of a larger monitor.
+    assert dialog.maximumWidth() > available.width()
+    assert dialog.maximumHeight() > available.height()
+    assert dialog.width() <= max(int(available.width() * 0.92), dialog.minimumWidth())
+    assert dialog.height() <= max(int(available.height() * 0.92), dialog.minimumHeight())
     assert "Alpha" in dialog.legend_label.text()
     assert "Beta" in dialog.legend_label.text()
     dialog.close()
