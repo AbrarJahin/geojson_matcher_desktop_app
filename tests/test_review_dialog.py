@@ -77,12 +77,15 @@ class FakePipeline:
     def manual_review_diagnostics(self):
         return {
             "selected": 2,
+            "safe_rejected": 8,
             "total_candidates": 10,
             "selected_fraction": 0.2,
-            "minimum": 1,
-            "maximum": 3,
-            "minimum_fraction": 0.02,
-            "maximum_fraction": 0.30,
+            "safe_reject_fraction": 0.8,
+            "minimum": 2,
+            "maximum": 2,
+            "minimum_fraction": 0.2,
+            "maximum_fraction": 0.2,
+            "within_bounds": True,
         }
 
     def pair_features(self, county_1_id: str, county_2_id: str) -> pd.Series:

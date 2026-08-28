@@ -41,7 +41,7 @@ Manual Yes/No actions now follow a deliberate in-memory workflow:
 <output>\.road_matcher_state\<File1>__<File2>_manual_review_progress.csv
 ```
 
-At startup, the application restores the most recent input/output selections. When those paths are still valid, it automatically reruns the analytical pipeline. A previous state CSV is merged only when its input paths, SHA-256 input fingerprints, pipeline settings, and retained algorithm fingerprint are compatible. If no compatible state exists, review begins from the first selected pair.
+At startup, the application restores the most recent input/output selections but does not start analysis automatically. Click **Analyze GeoJSON Files** when you are ready to run the analytical pipeline. A previous state CSV is merged only when its input paths, SHA-256 input fingerprints, pipeline settings, and retained algorithm fingerprint are compatible. If no compatible state exists, review begins from the first selected pair.
 
 Because decisions intentionally remain only in RAM until the whole application quits normally, an operating-system power loss, forced termination, or native crash before normal application shutdown can lose decisions made during that run.
 
@@ -100,7 +100,7 @@ conda run --prefix <project>/.venv ...
 1. Select two `.json` or `.geojson` road files.
 2. Select the output folder used for final outputs and resumable state.
 3. Confirm the road ID column, projected CRS, candidate distance, and batch size.
-4. Click **Analyze GeoJSON Files** the first time. On later launches, valid remembered paths are analyzed automatically.
+4. Click **Analyze GeoJSON Files** whenever you want to start analysis. Remembered paths are restored on later launches, but analysis does not start automatically.
 5. If a compatible state CSV exists, its decisions are restored into RAM. Otherwise review begins with no completed decisions.
 6. Review selected pairs with the Yes/No buttons or the **Y**/**N** keyboard shortcuts. The desktop queue starts with the lowest combined probability in the notebook-selected set and proceeds upward.
 7. **Return to Main Window** closes only the review window; decisions continue to exist in RAM.

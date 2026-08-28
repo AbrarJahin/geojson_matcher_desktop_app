@@ -43,7 +43,7 @@ def _write_empty_geojson(path: Path) -> None:
     path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
 
 
-def test_valid_remembered_project_auto_starts_with_or_without_saved_state(
+def test_auto_start_helper_can_still_run_valid_remembered_project_when_called(
     tmp_path: Path, monkeypatch
 ) -> None:
     _app()
@@ -64,11 +64,11 @@ def test_valid_remembered_project_auto_starts_with_or_without_saved_state(
     calls: list[str] = []
     window._start_analysis = lambda: calls.append("start")  # type: ignore[method-assign]
 
-    # No progress file: the remembered valid project starts from the beginning.
+    # The helper remains available for explicit/internal use, but construction no longer schedules it.
     window._auto_start_last_project()
     assert calls == ["start"]
 
-    # A progress file exists: startup still rebuilds the pipeline so the core
+    # A progress file exists: the helper still rebuilds the pipeline so the core
     # compatibility check can restore only matching decisions.
     state_dir = output / ".road_matcher_state"
     state_dir.mkdir()
@@ -129,14 +129,17 @@ def test_review_completion_starts_finalization_automatically(
     window.close()
 
 
-def test_constructor_schedules_taskbar_fit_and_remembered_project_resume(monkeypatch) -> None:
+def test_constructor_schedules_taskbar_fit_but_not_automatic_analysis(monkeypatch) -> None:
     _app()
     _RecordingTimer.calls = []
     monkeypatch.setattr(main_window_module, "QTimer", _RecordingTimer)
     window = MainWindow()
 
     assert (0, "_fit_to_available_screen") in _RecordingTimer.calls
-    assert (350, "_auto_start_last_project") in _RecordingTimer.calls
+    assert not any(
+        callback == "_auto_start_last_project"
+        for _, callback in _RecordingTimer.calls
+    )
     window.close()
 
 

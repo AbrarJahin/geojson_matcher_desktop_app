@@ -125,9 +125,10 @@ class MainWindow(QMainWindow):
         self._restore_settings()
         # Fit the first shown window inside the usable desktop work area (not
         # behind the Windows taskbar), while keeping it a normal resizable
-        # window.  Then resume the last valid project as originally intended.
+        # window. Automatic analysis of remembered files is intentionally
+        # disabled; the user starts analysis explicitly with the Analyze button.
         QTimer.singleShot(0, self._fit_to_available_screen)
-        QTimer.singleShot(350, self._auto_start_last_project)
+        # QTimer.singleShot(350, self._auto_start_last_project)
 
     def _fit_to_available_screen(self) -> None:
         """Choose an initial geometry wholly inside the current screen work area."""

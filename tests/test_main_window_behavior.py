@@ -1,0 +1,273 @@
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+from PySide6.QtWidgets import QApplication, QMessageBox
+
+import app.ui.main_window as main_window_module
+from app.core.pipeline import FinalizationResult
+from app.ui.main_window import MainWindow
+
+
+class _NoTimer:
+    @staticmethod
+    def singleShot(_milliseconds: int, _callback) -> None:  # type: ignore[no-untyped-def]
+        return None
+
+
+def _app() -> QApplication:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def _window(monkeypatch) -> MainWindow:  # type: ignore[no-untyped-def]
+    _app()
+    monkeypatch.setattr(main_window_module, "QTimer", _NoTimer)
+    return MainWindow()
+
+
+def test_config_reflects_current_ui_values(tmp_path: Path, monkeypatch) -> None:
+    window = _window(monkeypatch)
+    first = tmp_path / "A.geojson"
+    second = tmp_path / "B.geojson"
+    window.file_1_edit.setText(str(first))
+    window.file_2_edit.setText(str(second))
+    window.output_edit.setText(str(tmp_path / "out"))
+    window.road_id_edit.setText("RID")
+    window.target_crs_edit.setText("EPSG:26917")
+    window.buffer_spin.setValue(75.5)
+    window.batch_spin.setValue(12)
+
+    config = window._config()
+
+    assert config.county_file_1 == first
+    assert config.county_file_2 == second
+    assert config.output_dir == tmp_path / "out"
+    assert config.road_id_column == "RID"
+    assert config.target_crs == "EPSG:26917"
+    assert config.buffer_distance_meters == 75.5
+    assert config.max_manual_batch_size == 12
+    window.close()
+
+
+def test_set_busy_updates_buttons_progress_and_status(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    window.pipeline = object()  # type: ignore[assignment]
+
+    window._set_busy(True, "Working")
+    assert window.analyze_button.isEnabled() is False
+    assert window.review_button.isEnabled() is False
+    assert window.quit_button.isEnabled() is False
+    assert window.progress.value() == 0
+    assert window.status_label.text() == "Working"
+
+    window._set_busy(False, "Done")
+    assert window.analyze_button.isEnabled() is True
+    assert window.review_button.isEnabled() is True
+    assert window.quit_button.isEnabled() is True
+    assert window.progress.value() == 100
+    assert window.status_label.text() == "Done"
+    window.pipeline = None
+    window.close()
+
+
+def test_analysis_stage_clamps_progress_to_zero_through_99(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    window._analysis_stage(0, 0, "ignored")
+    assert window.progress.value() == 0
+    window._analysis_stage(3, 4, "ignored")
+    assert window.progress.value() == 50
+    window._analysis_stage(4, 4, "ignored")
+    assert window.progress.value() == 75
+    window._analysis_stage(99, 4, "ignored")
+    assert window.progress.value() == 99
+    assert "99% complete" in window.status_label.text()
+    window.close()
+
+
+def test_append_log_preserves_line_breaks_as_html(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    window._append_log("first\nsecond")
+    text = window.log_edit.toPlainText()
+    assert "first" in text
+    assert "second" in text
+    window.close()
+
+
+def test_invalid_start_analysis_shows_error_without_creating_thread(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    window.file_1_edit.clear()
+    window.file_2_edit.clear()
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, text: messages.append(str(text)),
+    )
+
+    window._start_analysis()
+
+    assert window._thread is None
+    assert len(messages) == 1
+    window.close()
+
+
+def test_task_failed_resets_ui_and_reports_error(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, title, text: messages.append(f"{title}:{text}"),
+    )
+
+    window._task_failed("Traceback: boom")
+
+    assert "Traceback: boom" in window.log_edit.toPlainText()
+    assert "Operation failed" in window.status_label.text()
+    assert messages and messages[0].startswith("Operation failed:")
+    window.close()
+
+
+def test_background_thread_finished_clears_worker_references(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    window._thread = object()  # type: ignore[assignment]
+    window._worker = object()
+    window._background_thread_finished()
+    assert window._thread is None
+    assert window._worker is None
+    window.close()
+
+
+def test_save_session_before_exit_success_and_failure(monkeypatch, tmp_path: Path) -> None:
+    window = _window(monkeypatch)
+
+    class GoodPipeline:
+        def save_session(self, *, force: bool, reason: str):
+            assert force is True
+            assert reason == "application quit"
+            return tmp_path / "session.csv"
+
+    window.pipeline = GoodPipeline()  # type: ignore[assignment]
+    assert window._save_session_before_exit() is True
+
+    class BadPipeline:
+        def save_session(self, *, force: bool, reason: str):
+            raise PermissionError("locked")
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, text: messages.append(str(text)),
+    )
+    window.pipeline = BadPipeline()  # type: ignore[assignment]
+    assert window._save_session_before_exit() is False
+    assert "locked" in messages[0]
+    window.pipeline = None
+    window.close()
+
+
+def test_open_output_folder_creates_directory_and_uses_desktop_services(
+    monkeypatch, tmp_path: Path
+) -> None:
+    window = _window(monkeypatch)
+    output = tmp_path / "new" / "output"
+    window.output_edit.setText(str(output))
+    urls: list[str] = []
+    monkeypatch.setattr(
+        main_window_module.QDesktopServices,
+        "openUrl",
+        lambda url: urls.append(url.toLocalFile()) or True,
+    )
+
+    window._open_output_folder()
+
+    assert output.is_dir()
+    assert [Path(path).resolve() for path in urls] == [output.resolve()]
+    window.close()
+
+
+def test_start_junction_round_completion_warns_when_pending(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, text: warnings.append(str(text)),
+    )
+    window.pipeline = SimpleNamespace(
+        junction_review_summary=lambda: {"remaining": 2, "selected": 3, "round": 1}
+    )  # type: ignore[assignment]
+
+    window._start_junction_round_completion()
+
+    assert warnings == ["2 junction(s) remain unanswered in this round."]
+    assert window._thread is None
+    window.pipeline = None
+    window.close()
+
+
+def test_start_junction_round_completion_finalizes_when_no_junctions(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    window.pipeline = SimpleNamespace(
+        junction_review_summary=lambda: {"remaining": 0, "selected": 0, "round": 2}
+    )  # type: ignore[assignment]
+    calls: list[str] = []
+    window._start_finalization = lambda: calls.append("finalize")  # type: ignore[method-assign]
+
+    window._start_junction_round_completion()
+
+    assert calls == ["finalize"]
+    window.pipeline = None
+    window.close()
+
+
+def test_start_finalization_refuses_uncommitted_junction_round(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, text: warnings.append(str(text)),
+    )
+    window.pipeline = SimpleNamespace(
+        junction_review_summary=lambda: {"remaining": 0, "selected": 1}
+    )  # type: ignore[assignment]
+
+    window._start_finalization()
+
+    assert warnings and "fully reviewed and committed" in warnings[0]
+    assert window._thread is None
+    window.pipeline = None
+    window.close()
+
+
+def test_finalization_completed_updates_summary_and_message(monkeypatch, tmp_path: Path) -> None:
+    window = _window(monkeypatch)
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda _parent, title, _text: messages.append(str(title)),
+    )
+    result = FinalizationResult(
+        county_1_output=tmp_path / "a.json",
+        county_2_output=tmp_path / "b.json",
+        final_decisions_csv=tmp_path / "decisions.csv",
+        decision_audit_csv=tmp_path / "audit.csv",
+        connection_audit_csv=tmp_path / "connections.csv",
+        accepted_pairs=7,
+        rejected_pairs=11,
+    )
+
+    window._finalization_completed(result)
+
+    assert "Accepted pairs: 7" in window.summary_label.text()
+    assert "Rejected pairs: 11" in window.summary_label.text()
+    assert window.status_label.text() == "Final outputs created successfully."
+    assert messages == ["Road matching complete"]
+    window.close()
