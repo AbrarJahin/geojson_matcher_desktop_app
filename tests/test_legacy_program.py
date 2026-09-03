@@ -8,8 +8,8 @@ import pandas as pd
 
 from app.core.legacy_program import CELLS
 
-EXPECTED_LEGACY_FILE_SHA256 = "cb51fff7958439d0ecb50c1e7c91e1507b56de67205aa31d65b75ae779fe9eda"
-EXPECTED_RETAINED_CELLS_SHA256 = "b2aec488afa9fd1c37df61f1261b736afbe60da5ca033e358e1ab94080c7ce1c"
+EXPECTED_LEGACY_FILE_SHA256 = "c4b430283415e1f7040de3dbc6670b8521ddefea8b455ab6683e42cf84cdcce4"
+EXPECTED_RETAINED_CELLS_SHA256 = "1374e3c2ab3e23f690a97bb631a23fd521b3aac3a48766a00373e7c911b6fc97"
 EXPECTED_NOTEBOOK_GEOMETRIC_CELL_SHA256 = (
     "b9631799e616f5f15b5cc4f573c04ddc7a08438840748e81935adb9796c8464c"
 )
@@ -36,7 +36,13 @@ def test_safe_reject_uses_only_the_notebook_global_threshold() -> None:
     safe_reject_source = cells["notebook_cell_32_safe_reject.py"]
 
     assert "SAFE17_GLOBAL_THRESHOLD" in safe_reject_source
-    assert "safe_reject_mask = base_global_reject" in safe_reject_source
+    assert (
+        "safe_reject_mask = base_global_reject & ~safe17_strong_direct_agreement"
+        in safe_reject_source
+    )
+    assert "SAFE17_DIRECT_GEOMETRY_THRESHOLD = 0.75" in safe_reject_source
+    assert "SAFE17_DIRECT_TEXTUAL_THRESHOLD = 0.75" in safe_reject_source
+    assert "SAFE17_DIRECT_MAX_DISAGREEMENT = 0.10" in safe_reject_source
     for desktop_only_marker in (
         "SAFE17_PARALLEL_THRESHOLD",
         "SAFE17_ORTHOGONAL_THRESHOLD",

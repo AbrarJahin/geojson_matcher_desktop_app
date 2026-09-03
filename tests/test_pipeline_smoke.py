@@ -86,3 +86,146 @@ def test_pipeline_runs_on_synthetic_geojson(tmp_path: Path) -> None:
     assert result.final_decisions_csv.exists()
     assert result.decision_audit_csv.exists()
     assert result.connection_audit_csv.exists()
+
+
+def test_strong_direct_evidence_protects_border_continuation_from_safe_reject(
+    tmp_path: Path,
+) -> None:
+    def feature(
+        object_id: int,
+        name: str,
+        posttype: str,
+        coordinates: list[list[float]],
+        address_start: int,
+        address_end: int,
+        city: str,
+    ) -> dict[str, object]:
+        return {
+            "type": "Feature",
+            "properties": {
+                "OBJECTID": object_id,
+                "st_name": name,
+                "st_postyp": posttype,
+                "roadclass": "Local",
+                "oneway": None,
+                "speedlimit": 35,
+                "geofromleft": address_start,
+                "geotoleft": address_end,
+                "geofromright": address_start + 1,
+                "geotoright": address_end + 1,
+                "geoparityleft": "E",
+                "geoparityright": "O",
+                "geocityleft": city,
+                "geocityright": city,
+                "geozipl": "46280",
+                "geozipr": "46280",
+            },
+            "geometry": {"type": "LineString", "coordinates": coordinates},
+        }
+
+    hamilton = tmp_path / "Hamilton_crop.geojson"
+    marion = tmp_path / "Marion_crop.geojson"
+
+    hamilton_features = [
+        feature(
+            1,
+            "96th",
+            "Street",
+            [[-86.145888239, 39.927175471], [-86.143980702, 39.927148681]],
+            700,
+            798,
+            "Indianapolis",
+        ),
+        feature(
+            2,
+            "96th",
+            "Street",
+            [[-86.147465266, 39.927157015], [-86.145888239, 39.927175471]],
+            604,
+            698,
+            "Indianapolis",
+        ),
+        feature(
+            3,
+            "College",
+            "Avenue",
+            [[-86.145888239, 39.927175471], [-86.145892285, 39.928043281]],
+            9600,
+            9606,
+            "Carmel",
+        ),
+    ]
+    marion_features = [
+        feature(
+            1,
+            "96th",
+            "Street",
+            [[-86.147533344, 39.927136538], [-86.145877663, 39.927158806]],
+            600,
+            698,
+            "Indianapolis",
+        ),
+        feature(
+            2,
+            "College",
+            "Avenue",
+            [[-86.145875034, 39.925298772], [-86.145877663, 39.927158806]],
+            9500,
+            9598,
+            "Indianapolis",
+        ),
+        feature(
+            3,
+            "96th",
+            "Street",
+            [
+                [-86.145877663, 39.927158806],
+                [-86.143982266, 39.927141055],
+                [-86.141841726, 39.927122885],
+            ],
+            700,
+            1026,
+            "Indianapolis",
+        ),
+    ]
+
+    hamilton.write_text(
+        json.dumps({"type": "FeatureCollection", "features": hamilton_features}),
+        encoding="utf-8",
+    )
+    marion.write_text(
+        json.dumps({"type": "FeatureCollection", "features": marion_features}),
+        encoding="utf-8",
+    )
+
+    pipeline = RoadMatchingPipeline(
+        PipelineConfig(hamilton, marion, tmp_path / "output")
+    ).run_analysis()
+    decisions = pipeline.decision_df
+
+    college_continuation = decisions.loc[
+        (decisions["OBJECTID_county1"] == 3)
+        & (decisions["OBJECTID_county2"] == 2)
+    ].iloc[0]
+
+    assert college_continuation["geometric_rule_probability"] > 0.95
+    assert college_continuation["geometric_valid_pair_probability"] < 0.75
+    assert college_continuation["textual_valid_pair_probability"] > 0.95
+    assert college_continuation["probablity"] < pipeline.optimized_threshold
+    assert bool(college_continuation["safe17_strong_direct_agreement"])
+    assert college_continuation["safe_reject_decision"] == "MANUAL_REVIEW"
+    assert (
+        college_continuation["safe_reject_reason"]
+        == "manual_review_strong_direct_geometry_text_agreement"
+    )
+
+    cross_street = decisions.loc[
+        decisions["name_1"].str.contains("96TH")
+        != decisions["name_2"].str.contains("96TH")
+    ]
+    assert len(cross_street) == 4
+    assert cross_street["safe_reject_decision"].eq("SAFE_REJECT").all()
+
+    diagnostics = pipeline.manual_review_diagnostics()
+    assert diagnostics["selected"] == 5
+    assert diagnostics["safe_rejected"] == 4
