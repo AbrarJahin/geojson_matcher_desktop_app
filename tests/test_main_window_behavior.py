@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 import app.ui.main_window as main_window_module
@@ -154,6 +155,13 @@ def test_input_and_output_browse_reuse_last_directories(
     monkeypatch, tmp_path: Path
 ) -> None:
     window = _window(monkeypatch)
+    # Do not depend on the machine-wide/native QSettings backend. On Windows,
+    # its application identity and pre-existing registry values depend on how
+    # pytest was launched and can make this unit test order-dependent.
+    window._settings = QSettings(
+        str(tmp_path / "browse-test.ini"), QSettings.Format.IniFormat
+    )
+    window._settings.clear()
     input_dir = tmp_path / "inputs"
     output_dir = tmp_path / "outputs"
     input_dir.mkdir()
@@ -189,6 +197,142 @@ def test_input_and_output_browse_reuse_last_directories(
     window._select_output_dir()
     assert output_starts == [output_dir]
     assert window.output_edit.text() == str(output_dir)
+    window.close()
+
+
+def test_dialog_directory_helpers_cover_file_directory_and_fallback(
+    monkeypatch, tmp_path: Path
+) -> None:
+    window = _window(monkeypatch)
+    settings = QSettings(
+        str(tmp_path / "dialog-test.ini"), QSettings.Format.IniFormat
+    )
+    settings.clear()
+    window._settings = settings
+    directory = tmp_path / "inputs"
+    directory.mkdir()
+    file_path = directory / "roads.geojson"
+    file_path.write_text("{}", encoding="utf-8")
+
+    assert window._existing_dialog_directory("") is None
+    assert window._existing_dialog_directory(directory) == directory
+    assert window._existing_dialog_directory(file_path) == directory
+    assert window._existing_dialog_directory(directory / "new.geojson") == directory
+    assert window._existing_dialog_directory(tmp_path / "missing" / "file.json") is None
+
+    settings.setValue("paths/last_input_dir", str(directory))
+    window.file_1_edit.clear()
+    window.file_2_edit.clear()
+    assert window._input_dialog_start_directory(window.file_2_edit) == directory
+    window.close()
+
+
+def test_cancelled_browse_does_not_change_paths_or_settings(
+    monkeypatch, tmp_path: Path
+) -> None:
+    window = _window(monkeypatch)
+    settings = QSettings(
+        str(tmp_path / "cancel-test.ini"), QSettings.Format.IniFormat
+    )
+    settings.clear()
+    window._settings = settings
+    original_file = str(tmp_path / "original.geojson")
+    original_output = str(tmp_path / "output")
+    window.file_1_edit.setText(original_file)
+    window.output_edit.setText(original_output)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: ("", ""))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args: "")
+
+    window._select_file(window.file_1_edit)
+    window._select_output_dir()
+
+    assert window.file_1_edit.text() == original_file
+    assert window.output_edit.text() == original_output
+    assert settings.value("paths/last_input_dir") is None
+    assert settings.value("paths/last_output_dir") is None
+    window.close()
+
+
+def test_analysis_completion_reports_recovered_session_and_routes_next_step(
+    monkeypatch
+) -> None:
+    window = _window(monkeypatch)
+    warnings: list[tuple[str, str]] = []
+    information: list[str] = []
+    routed: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((str(title), str(text))),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda _parent, title, _text: information.append(str(title)),
+    )
+    window._run_after_background_thread = (  # type: ignore[method-assign]
+        lambda callback: routed.append(callback.__name__)
+    )
+    pipeline = SimpleNamespace(
+        set_logger=lambda _logger: None,
+        loaded_session_path=None,
+        session_recovery_warning="working GeoJSON files are missing",
+        review_summary=lambda: {
+            "total_candidates": 10,
+            "safe_rejected": 8,
+            "safe_reject_fraction": 0.8,
+            "selected": 2,
+            "global_threshold": 0.5,
+        },
+        junction_review_summary=lambda: {
+            "round": 1,
+            "selected": 2,
+            "completed": 0,
+            "remaining": 2,
+            "deferred": 1,
+        },
+    )
+
+    window._analysis_completed(pipeline)  # type: ignore[arg-type]
+
+    assert warnings == [
+        ("Saved progress unavailable", "working GeoJSON files are missing")
+    ]
+    assert information == ["Processing complete"]
+    assert routed == ["_continue_current_workflow"]
+    assert "No saved session was loaded" in window.summary_label.text()
+    assert window.review_button.isEnabled() is True
+    window.pipeline = None
+    window.close()
+
+
+def test_continue_workflow_routes_pending_committed_and_finished_states(
+    monkeypatch,
+) -> None:
+    window = _window(monkeypatch)
+    calls: list[str] = []
+    window._open_review = lambda: calls.append("review")  # type: ignore[method-assign]
+    window._start_junction_round_completion = (  # type: ignore[method-assign]
+        lambda: calls.append("commit")
+    )
+    window._start_finalization = (  # type: ignore[method-assign]
+        lambda: calls.append("finalize")
+    )
+
+    for summary, expected in [
+        ({"remaining": 1, "selected": 1}, "review"),
+        ({"remaining": 0, "selected": 1}, "commit"),
+        ({"remaining": 0, "selected": 0}, "finalize"),
+    ]:
+        window.pipeline = SimpleNamespace(  # type: ignore[assignment]
+            junction_review_summary=lambda value=summary: value
+        )
+        window._continue_current_workflow()
+        assert calls[-1] == expected
+
+    window.pipeline = None
+    window._continue_current_workflow()
+    assert calls == ["review", "commit", "finalize"]
     window.close()
 
 

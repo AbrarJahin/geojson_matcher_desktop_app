@@ -226,15 +226,38 @@ def test_map_canvas_repeated_redraw_and_shutdown_without_worker_threads(tmp_path
     app.processEvents()
 
 
-def test_online_tile_requests_can_be_aborted_during_close(tmp_path: Path) -> None:
+def test_online_tile_requests_can_be_aborted_during_close(
+    tmp_path: Path, monkeypatch
+) -> None:
     app = _app()
     pipeline = FakePipeline(tmp_path)
     canvas = InteractiveMapCanvas()
+
+    class FakeReply:
+        def __init__(self) -> None:
+            self.aborted = False
+            self.deleted = False
+
+        def abort(self) -> None:
+            self.aborted = True
+
+        def deleteLater(self) -> None:
+            self.deleted = True
+
+    reply = FakeReply()
+
+    def fake_schedule(token, _bounds, _pipeline) -> None:  # type: ignore[no-untyped-def]
+        canvas._reply_context[reply] = {"token": token}
+        canvas._tile_batches[token] = {"remaining": 1}
+
+    monkeypatch.setattr(canvas, "_schedule_basemap", fake_schedule)
     canvas.draw_pair(pipeline, pipeline.review_rows().iloc[0], include_basemap=True)
     canvas.shutdown()
     app.processEvents()
     assert canvas._shutting_down is True
     assert canvas._reply_context == {}
+    assert reply.aborted is True
+    assert reply.deleted is True
 
 def test_online_basemap_refresh_is_throttled_and_uses_latest_view(
     tmp_path: Path,
