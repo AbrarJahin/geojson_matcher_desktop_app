@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import QSettings, QThread, QTimer, QUrl, Qt
 from PySide6.QtGui import QCloseEvent, QDesktopServices
@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
         self.pipeline: RoadMatchingPipeline | None = None
         self._thread: QThread | None = None
         self._worker: Any = None
+        self._pending_after_thread: Callable[[], None] | None = None
         self._settings = QSettings()
 
         self.file_1_edit = QLineEdit()
@@ -259,24 +260,71 @@ class MainWindow(QMainWindow):
         self._settings.setValue("map/online_basemap", self.basemap_checkbox.isChecked())
         self._settings.sync()
 
+    @staticmethod
+    def _existing_dialog_directory(value: Any) -> Path | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        path = Path(text).expanduser()
+        if path.is_file():
+            return path.parent
+        if path.is_dir():
+            return path
+        parent = path.parent
+        return parent if parent.is_dir() else None
+
+    def _input_dialog_start_directory(self, target: QLineEdit) -> Path:
+        other = self.file_2_edit if target is self.file_1_edit else self.file_1_edit
+        candidates = (
+            target.text(),
+            self._settings.value("paths/last_input_dir", ""),
+            other.text(),
+            self.output_edit.text(),
+            Path.home(),
+        )
+        for candidate in candidates:
+            directory = self._existing_dialog_directory(candidate)
+            if directory is not None:
+                return directory
+        return Path.home()
+
     def _select_file(self, target: QLineEdit) -> None:
+        start_directory = self._input_dialog_start_directory(target)
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Select road GeoJSON",
-            str(Path.home()),
+            str(start_directory),
             "GeoJSON files (*.geojson *.json);;All files (*)",
         )
         if filename:
             target.setText(filename)
+            self._settings.setValue(
+                "paths/last_input_dir", str(Path(filename).expanduser().parent)
+            )
+            self._settings.sync()
 
     def _select_output_dir(self) -> None:
+        candidates = (
+            self.output_edit.text(),
+            self._settings.value("paths/last_output_dir", ""),
+            self._settings.value("paths/last_input_dir", ""),
+            Path.home(),
+        )
+        start_directory = Path.home()
+        for candidate in candidates:
+            directory = self._existing_dialog_directory(candidate)
+            if directory is not None:
+                start_directory = directory
+                break
         directory = QFileDialog.getExistingDirectory(
             self,
             "Select output folder",
-            self.output_edit.text() or str(Path.home()),
+            str(start_directory),
         )
         if directory:
             self.output_edit.setText(directory)
+            self._settings.setValue("paths/last_output_dir", directory)
+            self._settings.sync()
 
     def _config(self) -> PipelineConfig:
         output_text = self.output_edit.text().strip()
@@ -320,10 +368,29 @@ class MainWindow(QMainWindow):
             return
 
         self._save_settings()
+        if self.pipeline is not None and self.pipeline.config == config:
+            LOGGER.info(
+                "Analyze requested for the active project; resuming its in-memory "
+                "review state without rebuilding the pipeline."
+            )
+            self._set_busy(False, "Resuming current review progress...")
+            self._continue_current_workflow()
+            return
+
         self.pipeline = None
         self.summary_label.clear()
         self.log_edit.clear()
-        self._set_busy(True, "Analyzing road files...")
+        state_dir = config.output_dir / ".road_matcher_state"
+        has_saved_state = state_dir.is_dir() and (
+            any(state_dir.glob("*_manual_review_progress*.csv"))
+            or any(state_dir.glob("*_junction_state.json"))
+        )
+        status = (
+            "Checking compatible saved progress and rebuilding analysis..."
+            if has_saved_state
+            else "No saved progress found; analyzing road files from the beginning..."
+        )
+        self._set_busy(True, status)
         LOGGER.info("Starting analysis for %s and %s", config.county_file_1, config.county_file_2)
 
         thread = QThread(self)
@@ -376,6 +443,12 @@ class MainWindow(QMainWindow):
         )
         self._set_busy(False, "Analysis complete.")
         self.review_button.setEnabled(junctions["selected"] > 0)
+        if pipeline.session_recovery_warning:
+            QMessageBox.warning(
+                self,
+                "Saved progress unavailable",
+                pipeline.session_recovery_warning,
+            )
         QMessageBox.information(
             self,
             "Processing complete",
@@ -387,12 +460,28 @@ class MainWindow(QMainWindow):
             "non-overlapping junctions. Each road appears in at most one junction "
             "during this round."
         )
+        self._run_after_background_thread(self._continue_current_workflow)
+
+    def _continue_current_workflow(self) -> None:
+        if self.pipeline is None:
+            return
+        junctions = self.pipeline.junction_review_summary()
         if junctions["remaining"] > 0:
             self._open_review()
         elif junctions["selected"] > 0:
             self._start_junction_round_completion()
         else:
             self._start_finalization()
+
+    def _run_after_background_thread(self, callback: Callable[[], None]) -> None:
+        thread = self._thread
+        if thread is not None and thread.isRunning():
+            self._pending_after_thread = callback
+            LOGGER.info(
+                "Queued the next workflow step until the current background thread exits."
+            )
+            return
+        QTimer.singleShot(0, callback)
 
     def _open_review(self) -> None:
         if self.pipeline is None:
@@ -440,6 +529,9 @@ class MainWindow(QMainWindow):
     def _start_junction_round_completion(self) -> None:
         if self.pipeline is None:
             return
+        if self._thread is not None and self._thread.isRunning():
+            self._run_after_background_thread(self._start_junction_round_completion)
+            return
         junctions = self.pipeline.junction_review_summary()
         if junctions["remaining"] > 0:
             QMessageBox.warning(
@@ -482,13 +574,18 @@ class MainWindow(QMainWindow):
             f"Round {junctions['round']}: {junctions['selected']} junction(s) ready; "
             f"deferred conflicts: {junctions['deferred']}."
         )
-        if junctions["selected"] > 0:
-            QTimer.singleShot(0, self._open_review)
-        else:
-            QTimer.singleShot(0, self._start_finalization)
+        next_step = (
+            self._open_review
+            if junctions["selected"] > 0
+            else self._start_finalization
+        )
+        self._run_after_background_thread(next_step)
 
     def _start_finalization(self) -> None:
         if self.pipeline is None:
+            return
+        if self._thread is not None and self._thread.isRunning():
+            self._run_after_background_thread(self._start_finalization)
             return
         if callable(getattr(self.pipeline, "junction_review_summary", None)):
             junctions = self.pipeline.junction_review_summary()
@@ -556,8 +653,12 @@ class MainWindow(QMainWindow):
 
     def _background_thread_finished(self) -> None:
         LOGGER.info("Background Qt thread finished.")
+        pending = self._pending_after_thread
+        self._pending_after_thread = None
         self._worker = None
         self._thread = None
+        if pending is not None:
+            QTimer.singleShot(0, pending)
 
     def _save_session_before_exit(self) -> bool:
         if self.pipeline is None:

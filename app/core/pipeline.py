@@ -217,6 +217,8 @@ class RoadMatchingPipeline:
         )
         self._loaded_session_path: Path | None = None
         self._decision_audit_output: Path | None = None
+        self._session_recovery_warning: str | None = None
+        self._restart_from_original_inputs = False
 
         # Junction orchestration is layered on top of the unchanged pair-level
         # analytical pipeline. A road can appear in only one proposal within a
@@ -287,6 +289,41 @@ class RoadMatchingPipeline:
             return self._working_file_1, self._working_file_2
         return self.config.county_file_1, self.config.county_file_2
 
+    def _quarantine_unusable_session(self) -> Path | None:
+        """Move an incomplete session aside so it cannot be loaded again."""
+        candidates = [
+            self._junction_state_path,
+            self._working_file_1,
+            self._working_file_2,
+            *self._session_candidates(),
+        ]
+        existing = list(dict.fromkeys(path for path in candidates if path.is_file()))
+        if not existing:
+            return None
+
+        archive_dir = (
+            self._state_dir
+            / "unusable_sessions"
+            / (
+                f"{self._pair_run_key}_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{os.getpid()}"
+            )
+        )
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=False)
+        except OSError:
+            LOGGER.exception("Could not create an archive for the incomplete session.")
+            return None
+
+        moved_any = False
+        for source in existing:
+            try:
+                shutil.move(str(source), str(archive_dir / source.name))
+                moved_any = True
+            except OSError:
+                LOGGER.exception("Could not archive incomplete session file: %s", source)
+        return archive_dir if moved_any else None
+
     def _load_junction_state(self) -> None:
         if self._junction_state_loaded:
             return
@@ -309,6 +346,30 @@ class RoadMatchingPipeline:
             )
             return
 
+        accepted_junctions = list(state.get("accepted_junctions", []))
+        missing_working_files = [
+            path
+            for path in (self._working_file_1, self._working_file_2)
+            if not path.is_file()
+        ]
+        if accepted_junctions and missing_working_files:
+            archive_dir = self._quarantine_unusable_session()
+            missing_names = ", ".join(path.name for path in missing_working_files)
+            self._session_recovery_warning = (
+                "A compatible junction session was found, but one or both working "
+                "GeoJSON files are missing from .road_matcher_state.\n\n"
+                f"Missing: {missing_names}\n\n"
+                "The incomplete saved session cannot be resumed. It was ignored, "
+                "and analysis restarted from the original two GeoJSON files."
+            )
+            if archive_dir is not None:
+                self._session_recovery_warning += (
+                    f"\n\nThe unusable session was preserved here:\n{archive_dir}"
+                )
+            self._restart_from_original_inputs = True
+            self.log(self._session_recovery_warning)
+            return
+
         self._junction_round = max(1, int(state.get("junction_round", 1)))
         self._rejected_junction_signatures = set(
             str(value) for value in state.get("rejected_signatures", [])
@@ -319,16 +380,11 @@ class RoadMatchingPipeline:
         self._accepted_pair_keys = set(
             str(value) for value in state.get("accepted_pair_keys", [])
         )
-        self._accepted_junction_history = list(state.get("accepted_junctions", []))
+        self._accepted_junction_history = accepted_junctions
         drafts = state.get("current_round_drafts", {})
         self._junction_drafts = drafts if isinstance(drafts, dict) else {}
 
         if self._accepted_junction_history:
-            if not self._working_file_1.is_file() or not self._working_file_2.is_file():
-                raise RuntimeError(
-                    "A compatible junction session was found, but one or both working "
-                    "GeoJSON files are missing from .road_matcher_state."
-                )
             self._loaded_session_path = self._junction_state_path
             self.log(
                 f"Restored junction session at round {self._junction_round}: "
@@ -594,7 +650,11 @@ class RoadMatchingPipeline:
         run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._build_session_identity()
         self._load_junction_state()
-        pair_progress = self._find_session_to_load()
+        pair_progress = (
+            None
+            if self._restart_from_original_inputs
+            else self._find_session_to_load()
+        )
         if self._loaded_session_path is None and pair_progress is not None:
             self._loaded_session_path = pair_progress
         progress_input = pair_progress or self._session_csv_path
@@ -784,6 +844,10 @@ class RoadMatchingPipeline:
     @property
     def loaded_session_path(self) -> Path | None:
         return self._loaded_session_path
+
+    @property
+    def session_recovery_warning(self) -> str | None:
+        return self._session_recovery_warning
 
     @staticmethod
     def _manual_review_bounds_for_total(

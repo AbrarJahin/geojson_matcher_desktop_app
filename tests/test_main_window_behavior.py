@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 import app.ui.main_window as main_window_module
 from app.core.pipeline import FinalizationResult
@@ -14,6 +14,12 @@ class _NoTimer:
     @staticmethod
     def singleShot(_milliseconds: int, _callback) -> None:  # type: ignore[no-untyped-def]
         return None
+
+
+class _ImmediateTimer:
+    @staticmethod
+    def singleShot(_milliseconds: int, callback) -> None:  # type: ignore[no-untyped-def]
+        callback()
 
 
 def _app() -> QApplication:
@@ -115,6 +121,77 @@ def test_invalid_start_analysis_shows_error_without_creating_thread(monkeypatch)
     window.close()
 
 
+def test_analyze_resumes_matching_in_memory_pipeline_without_rebuilding(
+    monkeypatch, tmp_path: Path
+) -> None:
+    window = _window(monkeypatch)
+    first = tmp_path / "Alpha.geojson"
+    second = tmp_path / "Beta.geojson"
+    first.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    second.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    window.file_1_edit.setText(str(first))
+    window.file_2_edit.setText(str(second))
+    window.output_edit.setText(str(tmp_path / "output"))
+    config = window._config().normalized()
+    active_pipeline = SimpleNamespace(config=config)
+    window.pipeline = active_pipeline  # type: ignore[assignment]
+    resumed: list[str] = []
+    window._continue_current_workflow = (  # type: ignore[method-assign]
+        lambda: resumed.append("resume")
+    )
+
+    window._start_analysis()
+
+    assert window.pipeline is active_pipeline
+    assert window._thread is None
+    assert resumed == ["resume"]
+    assert "Resuming current review progress" in window.status_label.text()
+    window.pipeline = None
+    window.close()
+
+
+def test_input_and_output_browse_reuse_last_directories(
+    monkeypatch, tmp_path: Path
+) -> None:
+    window = _window(monkeypatch)
+    input_dir = tmp_path / "inputs"
+    output_dir = tmp_path / "outputs"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    existing = input_dir / "existing.geojson"
+    existing.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    selected = input_dir / "selected.geojson"
+    starts: list[Path] = []
+
+    def select_file(_parent, _title, start, _filter):  # type: ignore[no-untyped-def]
+        starts.append(Path(start))
+        return str(selected), ""
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", select_file)
+    window.file_1_edit.setText(str(existing))
+    window._select_file(window.file_1_edit)
+    assert starts == [input_dir]
+    assert window.file_1_edit.text() == str(selected)
+
+    window.file_1_edit.clear()
+    window.file_2_edit.clear()
+    window._select_file(window.file_2_edit)
+    assert starts[-1] == input_dir
+
+    output_starts: list[Path] = []
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        lambda _parent, _title, start: output_starts.append(Path(start))
+        or str(output_dir),
+    )
+    window.output_edit.setText(str(output_dir))
+    window._select_output_dir()
+    assert output_starts == [output_dir]
+    assert window.output_edit.text() == str(output_dir)
+    window.close()
+
+
 def test_task_failed_resets_ui_and_reports_error(monkeypatch) -> None:
     window = _window(monkeypatch)
     messages: list[str] = []
@@ -137,6 +214,29 @@ def test_background_thread_finished_clears_worker_references(monkeypatch) -> Non
     window._thread = object()  # type: ignore[assignment]
     window._worker = object()
     window._background_thread_finished()
+    assert window._thread is None
+    assert window._worker is None
+    window.close()
+
+
+def test_next_workflow_step_waits_for_background_thread_exit(monkeypatch) -> None:
+    window = _window(monkeypatch)
+    monkeypatch.setattr(main_window_module, "QTimer", _ImmediateTimer)
+
+    class RunningThread:
+        @staticmethod
+        def isRunning() -> bool:
+            return True
+
+    window._thread = RunningThread()  # type: ignore[assignment]
+    window._worker = object()
+    calls: list[str] = []
+
+    window._run_after_background_thread(lambda: calls.append("next"))
+    assert calls == []
+
+    window._background_thread_finished()
+    assert calls == ["next"]
     assert window._thread is None
     assert window._worker is None
     window.close()
