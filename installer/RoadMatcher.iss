@@ -24,7 +24,13 @@ SetupIconFile=..\app\resources\road_matcher.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]
-Source: "..\dist\RoadMatcher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\RoadMatcher.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+; Remove the dependency tree left by pre-1.3 one-folder installations.
+Type: filesandordirs; Name: "{app}\_internal"
+Type: files; Name: "{app}\*.pyd"
+Type: files; Name: "{app}\python*.dll"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#MyAppUserModelID}"

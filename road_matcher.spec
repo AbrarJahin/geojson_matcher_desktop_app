@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import (
 )
 
 # Scientific/GIS packages carry CRS databases, projection grids, and native
-# libraries that must remain beside the executable.
+# libraries that must remain together when the one-file app extracts them.
 datas = []
 for package in ["geopandas", "pyproj", "matplotlib"]:
     datas += collect_data_files(package, include_py_files=False)
@@ -73,8 +73,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="RoadMatcher",
     icon="app/resources/road_matcher.ico",
     debug=False,
@@ -87,13 +88,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="RoadMatcher",
 )

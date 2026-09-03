@@ -24,7 +24,7 @@ CommandPart = Union[str, os.PathLike]
 ROOT = Path(__file__).resolve().parents[1]
 SPEC_FILE = ROOT / "road_matcher.spec"
 INNO_SCRIPT = ROOT / "installer" / "RoadMatcher.iss"
-DIST_EXE = ROOT / "dist" / "RoadMatcher" / (
+DIST_EXE = ROOT / "dist" / (
     "RoadMatcher.exe" if os.name == "nt" else "RoadMatcher"
 )
 INSTALLER_OUTPUT = ROOT / "installer_output" / "RoadMatcher-Setup-1.3.0.exe"
@@ -649,7 +649,7 @@ def show_help() -> None:
   make run             Launch the PySide6 desktop application
   make test            Run the automated test suite
   make verify          Run pip check, tests, and compilation checks
-  make build           Test and create dist/RoadMatcher/RoadMatcher.exe
+  make build           Test and create dist/RoadMatcher.exe
   make installer       Build and compile the Inno Setup installer
   make installer-only  Compile installer from an existing app build
   make clean           Remove build outputs and project Python caches

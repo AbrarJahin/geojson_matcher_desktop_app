@@ -27,10 +27,22 @@ def test_installer_shortcuts_use_same_windows_app_identity_as_process() -> None:
 
 def test_pyinstaller_spec_collects_complete_pyogrio_and_windows_wheel_libs() -> None:
     spec_text = (ROOT / "road_matcher.spec").read_text(encoding="utf-8")
+    installer_text = (ROOT / "installer" / "RoadMatcher.iss").read_text(
+        encoding="utf-8"
+    )
 
     assert 'collect_all("pyogrio")' in spec_text
     assert 'collect_delvewheel_libs_directory' in spec_text
     assert '["pyogrio", "pyproj", "shapely"]' in spec_text
+    assert "exclude_binaries=True" not in spec_text
+    assert "COLLECT(" not in spec_text
+    assert "a.binaries," in spec_text
+    assert "a.datas," in spec_text
+    assert 'Source: "..\\dist\\RoadMatcher.exe"' in installer_text
+    assert "recursesubdirs" not in installer_text
+    assert 'Name: "{app}\\_internal"' in installer_text
+    assert 'Name: "{app}\\*.pyd"' in installer_text
+    assert 'Name: "{app}\\python*.dll"' in installer_text
 
 
 def test_packaging_smoke_test_covers_real_geojson_io_and_projection() -> None:

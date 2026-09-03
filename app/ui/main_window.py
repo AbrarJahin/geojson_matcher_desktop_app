@@ -54,7 +54,6 @@ class MainWindow(QMainWindow):
             str(Path.home() / "Documents" / "RoadMatcherOutputs")
         )
         self.road_id_edit = QLineEdit("OBJECTID")
-        self.target_crs_edit = QLineEdit("EPSG:26916")
         self.buffer_spin = QDoubleSpinBox()
         self.buffer_spin.setRange(0.1, 10000.0)
         self.buffer_spin.setDecimals(1)
@@ -180,7 +179,6 @@ class MainWindow(QMainWindow):
         group = QGroupBox("Notebook-compatible settings")
         form = QFormLayout(group)
         form.addRow("Stable road ID column", self.road_id_edit)
-        form.addRow("Projected CRS", self.target_crs_edit)
         form.addRow("Candidate search distance", self.buffer_spin)
         form.addRow("Notebook rows per review batch", self.batch_spin)
         form.addRow("Map", self.basemap_checkbox)
@@ -194,9 +192,6 @@ class MainWindow(QMainWindow):
             self.output_edit.setText(str(stored_output))
         self.road_id_edit.setText(
             str(self._settings.value("pipeline/road_id", "OBJECTID"))
-        )
-        self.target_crs_edit.setText(
-            str(self._settings.value("pipeline/target_crs", "EPSG:26916"))
         )
         try:
             self.buffer_spin.setValue(
@@ -254,7 +249,6 @@ class MainWindow(QMainWindow):
         self._settings.setValue("paths/file_2", self.file_2_edit.text().strip())
         self._settings.setValue("paths/output", self.output_edit.text().strip())
         self._settings.setValue("pipeline/road_id", self.road_id_edit.text().strip())
-        self._settings.setValue("pipeline/target_crs", self.target_crs_edit.text().strip())
         self._settings.setValue("pipeline/buffer_m", self.buffer_spin.value())
         self._settings.setValue("pipeline/batch_size", self.batch_spin.value())
         self._settings.setValue("map/online_basemap", self.basemap_checkbox.isChecked())
@@ -335,7 +329,6 @@ class MainWindow(QMainWindow):
             county_file_2=Path(self.file_2_edit.text().strip()),
             output_dir=Path(output_text),
             buffer_distance_meters=self.buffer_spin.value(),
-            target_crs=self.target_crs_edit.text().strip(),
             road_id_column=self.road_id_edit.text().strip(),
             max_manual_batch_size=self.batch_spin.value(),
         )

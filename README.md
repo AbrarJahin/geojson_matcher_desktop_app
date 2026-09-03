@@ -157,10 +157,10 @@ make build
 make installer
 ```
 
-The standalone folder is written to:
+The standalone single-file application is written to:
 
 ```text
-dist\RoadMatcher\RoadMatcher.exe
+dist\RoadMatcher.exe
 ```
 
 The installer is written to:
@@ -169,4 +169,13 @@ The installer is written to:
 installer_output\RoadMatcher-Setup-1.3.0.exe
 ```
 
-The one-folder build is intentional because Qt and the scientific/GIS dependencies are more reliable in that form.
+The installer copies only `RoadMatcher.exe` into the application directory; it
+does not install loose `.py`, `.pyc`, `.pyd`, Python DLL, or package directories.
+When upgrading a legacy one-folder installation, it also removes that version's
+`_internal` directory and any root-level `.pyd` or `python*.dll` runtime files.
+The executable still contains the Python runtime and required native modules and
+temporarily extracts them while running. This keeps the installed directory
+clean and makes casual inspection harder, but it cannot guarantee prevention of
+reverse engineering. The frozen GIS smoke test runs before installer creation
+to reject a one-file build whose Qt, Pyogrio/GDAL, PyProj, or Shapely runtime is
+incomplete.

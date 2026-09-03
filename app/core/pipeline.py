@@ -19,7 +19,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -53,6 +53,7 @@ LogCallback = Callable[[str], None]
 StageCallback = Callable[[int, int, str], None]
 
 VALID_EXTENSIONS = {".json", ".geojson"}
+PROJECTED_CRS = "EPSG:26916"
 SESSION_SCHEMA_VERSION = 3
 JUNCTION_STATE_SCHEMA_VERSION = 1
 
@@ -105,7 +106,9 @@ class PipelineConfig:
     county_file_2: Path
     output_dir: Path
     buffer_distance_meters: float = 50.0
-    target_crs: str = "EPSG:26916"
+    # The retained notebook model and every distance threshold use this
+    # metre-based Indiana projection. It is intentionally not user-configurable.
+    target_crs: str = field(default=PROJECTED_CRS, init=False)
     latlon_crs: str = "EPSG:4326"
     road_id_column: str = "OBJECTID"
     min_manual_review_fraction: float = 0.02
@@ -127,7 +130,6 @@ class PipelineConfig:
             county_file_2=files[1],
             output_dir=output,
             buffer_distance_meters=float(self.buffer_distance_meters),
-            target_crs=self.target_crs.strip(),
             latlon_crs=self.latlon_crs.strip(),
             road_id_column=self.road_id_column.strip(),
             min_manual_review_fraction=float(self.min_manual_review_fraction),

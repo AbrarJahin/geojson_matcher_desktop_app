@@ -44,7 +44,6 @@ def test_config_reflects_current_ui_values(tmp_path: Path, monkeypatch) -> None:
     window.file_2_edit.setText(str(second))
     window.output_edit.setText(str(tmp_path / "out"))
     window.road_id_edit.setText("RID")
-    window.target_crs_edit.setText("EPSG:26917")
     window.buffer_spin.setValue(75.5)
     window.batch_spin.setValue(12)
 
@@ -54,7 +53,8 @@ def test_config_reflects_current_ui_values(tmp_path: Path, monkeypatch) -> None:
     assert config.county_file_2 == second
     assert config.output_dir == tmp_path / "out"
     assert config.road_id_column == "RID"
-    assert config.target_crs == "EPSG:26917"
+    assert config.target_crs == "EPSG:26916"
+    assert not hasattr(window, "target_crs_edit")
     assert config.buffer_distance_meters == 75.5
     assert config.max_manual_batch_size == 12
     window.close()

@@ -46,7 +46,7 @@ help:
 	@echo   make run             Start the PySide6 desktop application
 	@echo   make test            Run the automated tests
 	@echo   make verify          Check dependencies, tests, and Python compilation
-	@echo   make build           Create dist/RoadMatcher/RoadMatcher.exe
+	@echo   make build           Create dist/RoadMatcher.exe
 	@echo   make installer       Build the app and create the Windows installer
 	@echo   make installer-only  Create installer from an existing app build
 	@echo   make clean           Remove build outputs and project Python caches

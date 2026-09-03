@@ -90,7 +90,6 @@ def test_config_normalized_orders_files_resolves_paths_and_coerces_values(tmp_pa
         alpha,
         tmp_path / "out",
         buffer_distance_meters=12,
-        target_crs=" EPSG:26916 ",
         road_id_column=" OBJECTID ",
         max_manual_batch_size=7,
     ).normalized()
@@ -101,6 +100,21 @@ def test_config_normalized_orders_files_resolves_paths_and_coerces_values(tmp_pa
     assert cfg.target_crs == "EPSG:26916"
     assert cfg.road_id_column == "OBJECTID"
     assert cfg.max_manual_batch_size == 7
+
+
+def test_projected_crs_is_internal_and_cannot_be_overridden(tmp_path: Path) -> None:
+    first = tmp_path / "Alpha.geojson"
+    second = tmp_path / "Beta.geojson"
+    _write_geojson(first)
+    _write_geojson(second)
+
+    with pytest.raises(TypeError, match="target_crs"):
+        PipelineConfig(  # type: ignore[call-arg]
+            first,
+            second,
+            tmp_path / "out",
+            target_crs="EPSG:4326",
+        )
 
 
 @pytest.mark.parametrize(
