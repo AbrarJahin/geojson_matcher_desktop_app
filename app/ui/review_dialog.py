@@ -561,10 +561,8 @@ class ManualReviewDialog(QDialog):
             + _format_probability(row.get("textual_valid_pair_probability"))
             + "<br><b>Combined:</b> "
             + _format_probability(row.get("probablity"))
-            + "<br><b>Applicable Safe Reject threshold:</b> "
-            + _format_probability(
-                row.get("safe17_applied_threshold", self.pipeline.optimized_threshold)
-            )
+            + "<br><b>Safe Reject threshold:</b> "
+            + _format_probability(self.pipeline.optimized_threshold)
         )
         self.reason_label.setText(
             "<b>Selection reason:</b><br>"

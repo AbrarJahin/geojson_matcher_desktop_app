@@ -106,8 +106,6 @@ def test_review_completion_starts_finalization_automatically(
                 "remaining": 0,
                 "threshold": 0.5,
                 "global_threshold": 0.5,
-                "parallel_threshold": 0.6,
-                "orthogonal_threshold": 0.7,
             }
 
     class CompletedDialog:

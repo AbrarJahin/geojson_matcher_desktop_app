@@ -372,9 +372,7 @@ class MainWindow(QMainWindow):
             f"Junction round {junctions['round']}: {junctions['selected']} shown | "
             f"Completed: {junctions['completed']} | Remaining: {junctions['remaining']} | "
             f"Deferred conflicts: {junctions['deferred']}<br>"
-            f"Safe thresholds — global: {summary['global_threshold']:.6f}, "
-            f"parallel: {summary['parallel_threshold']:.6f}, "
-            f"near-90°: {summary['orthogonal_threshold']:.6f}<br>{session_text}"
+            f"Safe Reject threshold: {summary['global_threshold']:.6f}<br>{session_text}"
         )
         self._set_busy(False, "Analysis complete.")
         self.review_button.setEnabled(junctions["selected"] > 0)
@@ -433,9 +431,7 @@ class MainWindow(QMainWindow):
             f"Manual review: {summary['selected']} "
             f"({summary['selected_fraction']:.2%}) | "
             f"Completed: {summary['completed']} | Remaining: {summary['remaining']}<br>"
-            f"Safe thresholds — global: {summary['global_threshold']:.6f}, "
-            f"parallel: {summary['parallel_threshold']:.6f}, "
-            f"near-90°: {summary['orthogonal_threshold']:.6f}<br>"
+            f"Safe Reject threshold: {summary['global_threshold']:.6f}<br>"
             f"Session file: {self.pipeline.session_path}"
         )
         if summary["remaining"] == 0:

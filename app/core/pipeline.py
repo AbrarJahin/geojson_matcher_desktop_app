@@ -59,13 +59,6 @@ JUNCTION_STATE_SCHEMA_VERSION = 1
 # Section 18.0 single Safe Reject threshold: reject only below the
 # lowest probability observed among labeled VALID pairs (strict < rule).
 SAFE_REJECT_GLOBAL_THRESHOLD = 0.937979492358832
-SAFE_REJECT_PARALLEL_THRESHOLD = 0.937979492358832
-SAFE_REJECT_ORTHOGONAL_THRESHOLD = 0.937979492358832
-SAFE_REJECT_LOCAL_HALF_WINDOW_M = 60.0
-SAFE_REJECT_MIN_LOCAL_STRAIGHTNESS = 0.98
-SAFE_REJECT_MAX_LOCAL_CUMULATIVE_TURN_DEG = 10.0
-SAFE_REJECT_PARALLEL_MAX_HEADING_DIFF_DEG = 10.0
-SAFE_REJECT_ORTHOGONAL_MIN_HEADING_DIFF_DEG = 80.0
 
 
 class _InMemoryCsvBuffer(io.StringIO):
@@ -419,8 +412,6 @@ class RoadMatchingPipeline:
             "random_state": cfg.random_state,
             "legacy_program_sha256": _legacy_program_sha256(),
             "safe_reject_global_threshold": SAFE_REJECT_GLOBAL_THRESHOLD,
-            "safe_reject_parallel_threshold": SAFE_REJECT_PARALLEL_THRESHOLD,
-            "safe_reject_orthogonal_threshold": SAFE_REJECT_ORTHOGONAL_THRESHOLD,
         }
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         self._session_signature = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -656,19 +647,6 @@ class RoadMatchingPipeline:
             "MAX_MANUAL_REVIEW_FRACTION": cfg.max_manual_review_fraction,
             "MAX_MANUAL_BATCH_SIZE": cfg.max_manual_batch_size,
             "SAFE_REJECT_GLOBAL_THRESHOLD": SAFE_REJECT_GLOBAL_THRESHOLD,
-            "SAFE_REJECT_PARALLEL_THRESHOLD": SAFE_REJECT_PARALLEL_THRESHOLD,
-            "SAFE_REJECT_ORTHOGONAL_THRESHOLD": SAFE_REJECT_ORTHOGONAL_THRESHOLD,
-            "SAFE_REJECT_LOCAL_HALF_WINDOW_M": SAFE_REJECT_LOCAL_HALF_WINDOW_M,
-            "SAFE_REJECT_MIN_LOCAL_STRAIGHTNESS": SAFE_REJECT_MIN_LOCAL_STRAIGHTNESS,
-            "SAFE_REJECT_MAX_LOCAL_CUMULATIVE_TURN_DEG": (
-                SAFE_REJECT_MAX_LOCAL_CUMULATIVE_TURN_DEG
-            ),
-            "SAFE_REJECT_PARALLEL_MAX_HEADING_DIFF_DEG": (
-                SAFE_REJECT_PARALLEL_MAX_HEADING_DIFF_DEG
-            ),
-            "SAFE_REJECT_ORTHOGONAL_MIN_HEADING_DIFF_DEG": (
-                SAFE_REJECT_ORTHOGONAL_MIN_HEADING_DIFF_DEG
-            ),
             "COUNTY_FILE_1": str(analysis_file_1),
             "COUNTY_FILE_2": str(analysis_file_2),
             "COUNTY_1_NAME": county_name_from_filename(cfg.county_file_1),
@@ -793,8 +771,6 @@ class RoadMatchingPipeline:
         self._require_analysis()
         return {
             "global": float(self.namespace["SAFE17_GLOBAL_THRESHOLD"]),
-            "parallel": float(self.namespace["SAFE17_PARALLEL_THRESHOLD"]),
-            "orthogonal": float(self.namespace["SAFE17_ORTHOGONAL_THRESHOLD"]),
         }
 
     @property
@@ -905,8 +881,6 @@ class RoadMatchingPipeline:
             "remaining": int(len(selected) - completed),
             "threshold": thresholds["global"],
             "global_threshold": thresholds["global"],
-            "parallel_threshold": thresholds["parallel"],
-            "orthogonal_threshold": thresholds["orthogonal"],
             "minimum_review_count": int(diagnostics["minimum"]),
             "maximum_review_count": int(diagnostics["maximum"]),
             "selected_fraction": float(diagnostics["selected_fraction"]),
@@ -1428,4 +1402,3 @@ class RoadMatchingPipeline:
                 "Complete the round before creating final outputs."
             )
         return self._finalize_junction_outputs()
-

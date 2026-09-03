@@ -68,8 +68,6 @@ def _analysis_ready(pipeline: RoadMatchingPipeline) -> RoadMatchingPipeline:
     pipeline.namespace = {
         "section_24_decision_df": _decision_frame(),
         "SAFE17_GLOBAL_THRESHOLD": 0.5,
-        "SAFE17_PARALLEL_THRESHOLD": 0.6,
-        "SAFE17_ORTHOGONAL_THRESHOLD": 0.7,
     }
     return pipeline
 
@@ -204,8 +202,6 @@ def test_analysis_properties_review_rows_and_summary(tmp_path: Path) -> None:
     assert pipeline.optimized_threshold == 0.5
     assert pipeline.safe_reject_thresholds == {
         "global": 0.5,
-        "parallel": 0.6,
-        "orthogonal": 0.7,
     }
     assert pipeline.review_rows()["pair_key"].tolist() == ["1||101"]
     summary = pipeline.review_summary()
