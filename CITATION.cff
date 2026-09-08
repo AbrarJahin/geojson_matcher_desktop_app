@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Road Matcher Desktop"
+version: "1.3.0"
+
+authors:
+  - family-names: "Jahin"
+    given-names: "S. M. Abrar"
+
+repository-code: "https://github.com/AbrarJahin/geojson_matcher_desktop_app"
