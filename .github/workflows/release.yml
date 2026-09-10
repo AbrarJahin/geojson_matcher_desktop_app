@@ -1,29 +1,128 @@
-name: Release Windows Installer
+name: Automatic Windows Release
 
 on:
-  release:
-    types:
-      - published
+  push:
+    branches:
+      - master
+    paths:
+      - pyproject.toml
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-installer:
-    name: Test, build, and attach installer
+  release:
+    name: Version-gated Windows release
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       QT_QPA_PLATFORM: offscreen
       PYTEST_ADDOPTS: "--tb=long -ra"
 
     steps:
-      - name: Check out released tag
+      - name: Check out master revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Detect pyproject version change
+        id: version
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $currentText = Get-Content "pyproject.toml" -Raw
+          $currentMatch = [regex]::Match(
+            $currentText,
+            '(?m)^\s*version\s*=\s*"([^"]+)"\s*$'
+          )
+          if (-not $currentMatch.Success) {
+            throw 'Could not find [project] version = "..." in pyproject.toml.'
+          }
+
+          $version = $currentMatch.Groups[1].Value.Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release versions must use X.Y.Z format. Found: $version"
+          }
+
+          $previousVersion = ""
+          $versionChanged = $false
+
+          if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            # Manual runs are an explicit request to release the current
+            # pyproject version, even when that version did not just change.
+            $versionChanged = $true
+            $previousVersion = "<manual run>"
+          }
+          elseif (
+            [string]::IsNullOrWhiteSpace($env:BEFORE_SHA) -or
+            $env:BEFORE_SHA -match '^0+$'
+          ) {
+            # Defensive fallback for an unusual first push/new-history event.
+            $versionChanged = $true
+            $previousVersion = "<unavailable>"
+          }
+          else {
+            $previousText = git show "${env:BEFORE_SHA}:pyproject.toml" 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not read pyproject.toml from the pre-push revision $env:BEFORE_SHA."
+            }
+
+            $previousMatch = [regex]::Match(
+              ($previousText -join "`n"),
+              '(?m)^\s*version\s*=\s*"([^"]+)"\s*$'
+            )
+            if (-not $previousMatch.Success) {
+              throw "Could not read the previous project version."
+            }
+
+            $previousVersion = $previousMatch.Groups[1].Value.Trim()
+            $versionChanged = $previousVersion -ne $version
+          }
+
+          $shortSha = $env:CURRENT_SHA.Substring(0, 4).ToLowerInvariant()
+
+          # '+' is SemVer build-metadata syntax. The requested four-character
+          # Git abbreviation therefore does not turn the release into a
+          # prerelease (which a '-' suffix would do).
+          $releaseTag = "v$version+$shortSha"
+          $releaseTitle = "Road Matcher $version ($shortSha)"
+          $assetName = "RoadMatcher-Setup-$version-$shortSha.exe"
+
+          "changed=$($versionChanged.ToString().ToLowerInvariant())" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$version" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "previous_version=$previousVersion" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "short_sha=$shortSha" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "release_tag=$releaseTag" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "release_title=$releaseTitle" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "asset_name=$assetName" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          Write-Host "Previous version: $previousVersion"
+          Write-Host "Current version:  $version"
+          Write-Host "Version changed:  $versionChanged"
+          Write-Host "Release tag:      $releaseTag"
+
+      - name: No release needed
+        if: steps.version.outputs.changed != 'true'
+        shell: pwsh
+        run: |
+          Write-Host "pyproject.toml changed, but its project version did not."
+          Write-Host "No installer or GitHub Release will be created."
 
       - name: Set up Conda
+        if: steps.version.outputs.changed == 'true'
         uses: conda-incubator/setup-miniconda@v4
         with:
           activate-environment: ""
@@ -31,65 +130,184 @@ jobs:
           miniconda-version: latest
 
       - name: Install GNU Make and Inno Setup
+        if: steps.version.outputs.changed == 'true'
         shell: pwsh
         run: |
           choco install make innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
           make --version
 
-      - name: Verify Conda command
+      - name: Verify release tools
+        if: steps.version.outputs.changed == 'true'
         shell: pwsh
         run: |
           Write-Host "setup-miniconda installation root: $env:CONDA"
           Write-Host "Make will explicitly use the conda executable from PATH."
           Get-Command conda
           conda --version
+          Get-Command make
+          Get-Command gh
+          gh --version
+
+      - name: Synchronize build version from pyproject
+        if: steps.version.outputs.changed == 'true'
+        shell: pwsh
+        env:
+          PROJECT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:PROJECT_VERSION
+
+          # pyproject.toml is the release source of truth. The repository's
+          # current build files still contain a mirrored numeric version, so
+          # synchronize those copies only inside this ephemeral runner checkout.
+          # Nothing is committed back to master.
+
+          $appInitPath = "app/__init__.py"
+          $appInit = Get-Content $appInitPath -Raw
+          $updatedAppInit = [regex]::Replace(
+            $appInit,
+            '__version__\s*=\s*"[^"]+"',
+            "__version__ = `"$version`"",
+            1
+          )
+          if ($updatedAppInit -eq $appInit -and $appInit -notmatch [regex]::Escape("__version__ = `"$version`"")) {
+            throw "Could not synchronize app/__init__.py version."
+          }
+          Set-Content -Path $appInitPath -Value $updatedAppInit -Encoding utf8 -NoNewline
+
+          $issPath = "installer/RoadMatcher.iss"
+          $iss = Get-Content $issPath -Raw
+          $updatedIss = [regex]::Replace(
+            $iss,
+            '#define MyAppVersion\s+"[^"]+"',
+            "#define MyAppVersion `"$version`"",
+            1
+          )
+          if ($updatedIss -eq $iss -and $iss -notmatch [regex]::Escape("#define MyAppVersion `"$version`"")) {
+            throw "Could not synchronize installer/RoadMatcher.iss version."
+          }
+          Set-Content -Path $issPath -Value $updatedIss -Encoding utf8 -NoNewline
+
+          $tasksPath = "scripts/project_tasks.py"
+          $tasks = Get-Content $tasksPath -Raw
+          $expectedInstaller = "RoadMatcher-Setup-$version.exe"
+          $updatedTasks = [regex]::Replace(
+            $tasks,
+            'RoadMatcher-Setup-\d+\.\d+\.\d+\.exe',
+            $expectedInstaller,
+            1
+          )
+          if ($updatedTasks -eq $tasks -and $tasks -notmatch [regex]::Escape($expectedInstaller)) {
+            throw "Could not synchronize scripts/project_tasks.py installer filename."
+          }
+          Set-Content -Path $tasksPath -Value $updatedTasks -Encoding utf8 -NoNewline
+
+          Write-Host "Build-time version synchronized to $version."
+          Write-Host "Source of truth remains pyproject.toml."
 
       - name: Set up project environment
+        if: steps.version.outputs.changed == 'true'
         shell: pwsh
         run: |
-          & make setup CONDA=conda 2>&1 | Tee-Object -FilePath release-setup.log
+          & make setup CONDA=conda 2>&1 |
+            Tee-Object -FilePath release-setup.log
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
 
-      - name: Run publish gate and build installer
+      - name: Run tests, build, smoke test, and installer
+        if: steps.version.outputs.changed == 'true'
         shell: pwsh
         run: |
-          & make publish CONDA=conda 2>&1 | Tee-Object -FilePath publish.log
+          & make publish CONDA=conda 2>&1 |
+            Tee-Object -FilePath publish.log
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
 
-      - name: Locate generated installer
+      - name: Prepare versioned installer asset
+        if: steps.version.outputs.changed == 'true'
+        id: installer
         shell: pwsh
+        env:
+          PROJECT_VERSION: ${{ steps.version.outputs.version }}
+          ASSET_NAME: ${{ steps.version.outputs.asset_name }}
         run: |
-          $installer = Get-ChildItem `
-            -Path installer_output `
-            -Filter "RoadMatcher-Setup-*.exe" |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
+          $ErrorActionPreference = "Stop"
 
-          if ($null -eq $installer) {
-            throw "No RoadMatcher installer EXE was found in installer_output."
+          $expectedName = "RoadMatcher-Setup-$env:PROJECT_VERSION.exe"
+          $source = Join-Path "installer_output" $expectedName
+
+          if (-not (Test-Path $source -PathType Leaf)) {
+            throw "Expected installer was not created: $source"
           }
 
-          "INSTALLER_PATH=$($installer.FullName)" |
-            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $asset = Join-Path "installer_output" $env:ASSET_NAME
+          Copy-Item $source $asset -Force
 
-          Write-Host "Installer ready: $($installer.FullName)"
+          $fullAssetPath = (Resolve-Path $asset).Path
+          "asset_path=$fullAssetPath" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Attach installer EXE to GitHub Release
+          Write-Host "GitHub Release asset: $fullAssetPath"
+
+      - name: Create or update GitHub Release
+        if: steps.version.outputs.changed == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          RELEASE_TITLE: ${{ steps.version.outputs.release_title }}
+          INSTALLER_ASSET: ${{ steps.installer.outputs.asset_path }}
         run: |
-          gh release upload `
-            "${{ github.event.release.tag_name }}" `
-            "$env:INSTALLER_PATH" `
+          $ErrorActionPreference = "Stop"
+
+          gh release view "$env:RELEASE_TAG" `
+            --repo "$env:GITHUB_REPOSITORY" *> $null
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Creating draft GitHub Release $env:RELEASE_TAG ..."
+            gh release create "$env:RELEASE_TAG" `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --target "$env:GITHUB_SHA" `
+              --title "$env:RELEASE_TITLE" `
+              --generate-notes `
+              --draft
+
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+          else {
+            Write-Host "Release already exists; replacing its installer asset."
+          }
+
+          gh release upload "$env:RELEASE_TAG" `
+            "$env:INSTALLER_ASSET" `
+            --repo "$env:GITHUB_REPOSITORY" `
             --clobber
 
-      - name: Upload release logs after a failure
-        if: failure()
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          # Publish only after the installer asset was uploaded successfully,
+          # so users do not see an empty/half-created release.
+          gh release edit "$env:RELEASE_TAG" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --draft=false
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          Write-Host "Published GitHub Release: $env:RELEASE_TAG"
+
+      - name: Upload release diagnostics after a failure
+        if: failure() && steps.version.outputs.changed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: release-build-logs-${{ github.run_id }}

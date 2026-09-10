@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - master
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,11 +15,12 @@ permissions:
 jobs:
   test:
     name: Unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       QT_QPA_PLATFORM: offscreen
       PYTEST_ADDOPTS: "--tb=long -ra"
+
     defaults:
       run:
         shell: bash -el {0}
@@ -26,6 +28,21 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Install Linux Qt runtime libraries
+        run: |
+          set -euo pipefail
+          sudo apt-get update 2>&1 | tee system-deps.log
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 \
+            libgl1 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            2>&1 | tee -a system-deps.log
+
+          echo
+          echo "Relevant graphics libraries available to the runner:"
+          ldconfig -p | grep -E 'libEGL\.so\.1|libGL\.so\.1' | tee -a system-deps.log
 
       - name: Set up Conda
         uses: conda-incubator/setup-miniconda@v4
@@ -52,12 +69,13 @@ jobs:
           set -euo pipefail
           make test CONDA=conda 2>&1 | tee pytest.log
 
-      - name: Upload test logs after a failure
+      - name: Upload diagnostic logs after a failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: unit-test-logs-${{ github.run_id }}
           path: |
+            system-deps.log
             setup.log
             pytest.log
           if-no-files-found: ignore
