@@ -13,7 +13,7 @@ from PySide6.QtGui import QIcon
 
 from app import __version__
 from app.logging_setup import GuardedApplication, configure_logging
-from app.ui.main_window import MainWindow
+from app.ui.updated_map_window import MainWindow
 
 
 WINDOWS_APP_USER_MODEL_ID = "RoadMatcher.Research.Desktop"
