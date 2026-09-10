@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux Qt runtime libraries
         run: |
@@ -71,7 +71,7 @@ jobs:
 
       - name: Upload diagnostic logs after a failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unit-test-logs-${{ github.run_id }}
           path: |

@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Check out current master
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: master
           fetch-depth: 0
@@ -132,7 +132,7 @@ jobs:
 
     steps:
       - name: Check out tested master commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.gate.outputs.sha }}
 
@@ -373,9 +373,29 @@ jobs:
           rm -rf "$DMG_ROOT"
           mkdir -p "$DMG_ROOT" release_asset
 
+          echo "Disk space before macOS packaging cleanup:"
+          df -h /
+
+          # The .app has already passed the frozen GIS smoke test. These are
+          # build-only files and can be removed before hdiutil creates another
+          # filesystem image. This avoids disk exhaustion on the smaller Intel
+          # macOS hosted runner.
+          rm -rf \
+            "$GITHUB_WORKSPACE/.venv" \
+            "$GITHUB_WORKSPACE/build" \
+            "$HOME/Library/Caches/pip" \
+            "$HOME/Library/Application Support/pyinstaller"
+
           # ditto preserves the macOS application bundle structure.
           ditto "$APP_BUNDLE" "$DMG_ROOT/Road Matcher.app"
           ln -s /Applications "$DMG_ROOT/Applications"
+
+          # The complete staged .app now lives under RUNNER_TEMP, so the
+          # original PyInstaller dist tree is no longer needed.
+          rm -rf "$GITHUB_WORKSPACE/dist"
+
+          echo "Disk space after macOS packaging cleanup:"
+          df -h /
 
           hdiutil create \
             -volname "Road Matcher ${PROJECT_VERSION}" \
@@ -388,7 +408,7 @@ jobs:
           echo "Prepared release_asset/${ASSET_NAME}"
 
       - name: Upload platform installer for release job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.asset_label }}
           path: release_asset/*
@@ -397,7 +417,7 @@ jobs:
 
       - name: Upload build diagnostics after a failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-build-logs-${{ matrix.asset_label }}-${{ github.run_id }}
           path: |
@@ -417,7 +437,7 @@ jobs:
 
     steps:
       - name: Download all successful platform installers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: release-assets
