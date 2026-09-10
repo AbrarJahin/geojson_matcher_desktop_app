@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,10 +96,60 @@ def test_pyproject_is_single_active_version_source() -> None:
 
     assert "_version_from_pyproject" in app_text
     assert "project_version()" in tasks_text
-    assert '--define=MyAppVersion="{0}"' in tasks_text
+    assert '/DMyAppVersion={0}' in tasks_text
     assert "#ifndef MyAppVersion" in installer_text
     assert "from app import __version__" in map_text
     assert "RoadMatcherDesktop/{__version__}" in map_text
+
+
+def test_inno_version_define_uses_compatible_unquoted_switch() -> None:
+    tasks_text = (ROOT / "scripts" / "project_tasks.py").read_text(
+        encoding="utf-8"
+    )
+
+    # ISCC's established /D preprocessor switch accepts dotted version values
+    # directly. Do not embed quotes inside the argv item: the Windows compiler
+    # can reinterpret them and reject the option before reading the .iss file.
+    assert '"/DMyAppVersion={0}".format(PROJECT_VERSION)' in tasks_text
+    assert '--define=MyAppVersion="{0}"' not in tasks_text
+
+
+def test_compile_installer_passes_exact_unquoted_version_define(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import scripts.project_tasks as project_tasks
+
+    dist_exe = tmp_path / "RoadMatcher.exe"
+    dist_exe.write_bytes(b"exe")
+    installer_output = tmp_path / (
+        f"RoadMatcher-Setup-{project_tasks.PROJECT_VERSION}.exe"
+    )
+    captured: list[list[object]] = []
+
+    monkeypatch.setattr(project_tasks, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(project_tasks, "require_runtime_python", lambda: None)
+    monkeypatch.setattr(project_tasks, "DIST_EXE", dist_exe)
+    monkeypatch.setattr(project_tasks, "INSTALLER_OUTPUT", installer_output)
+    monkeypatch.setattr(
+        project_tasks,
+        "find_iscc",
+        lambda: Path("ISCC.exe"),
+    )
+
+    def fake_run(command, *args, **kwargs):  # type: ignore[no-untyped-def]
+        captured.append(list(command))
+        installer_output.write_bytes(b"installer")
+
+    monkeypatch.setattr(project_tasks, "run_command", fake_run)
+
+    project_tasks.compile_installer()
+
+    assert len(captured) == 1
+    assert captured[0][1] == (
+        f"/DMyAppVersion={project_tasks.PROJECT_VERSION}"
+    )
+    assert '"' not in str(captured[0][1])
 
 
 def test_release_workflow_shows_version_in_build_and_publish_jobs() -> None:

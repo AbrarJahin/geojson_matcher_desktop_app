@@ -565,7 +565,7 @@ def compile_installer() -> None:
     run_command(
         [
             iscc,
-            '--define=MyAppVersion="{0}"'.format(PROJECT_VERSION),
+            "/DMyAppVersion={0}".format(PROJECT_VERSION),
             str(INNO_SCRIPT),
         ]
     )
