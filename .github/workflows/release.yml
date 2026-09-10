@@ -376,10 +376,10 @@ jobs:
           echo "Disk space before macOS packaging cleanup:"
           df -h /
 
-          # The .app has already passed the frozen GIS smoke test. These are
-          # build-only files and can be removed before hdiutil creates another
-          # filesystem image. This avoids disk exhaustion on the smaller Intel
-          # macOS hosted runner.
+          # The .app has already passed the frozen GIS smoke test. Reclaim
+          # build-only host storage before DMG creation; the explicit image
+          # sizing below separately prevents hdiutil from undersizing its
+          # transient filesystem on the Intel runner.
           rm -rf \
             "$GITHUB_WORKSPACE/.venv" \
             "$GITHUB_WORKSPACE/build" \
@@ -389,6 +389,27 @@ jobs:
           # ditto preserves the macOS application bundle structure.
           ditto "$APP_BUNDLE" "$DMG_ROOT/Road Matcher.app"
           ln -s /Applications "$DMG_ROOT/Applications"
+
+          # hdiutil's -srcfolder auto-sizing can undershoot filesystem overhead.
+          # Size from logical file bytes plus 50% headroom (64 MiB minimum).
+          DMG_CONTENT_BYTES="$(
+            find "$DMG_ROOT" -type f -exec stat -f '%z' {} + |
+              awk '{ total += $1 } END { printf "%.0f\n", total }'
+          )"
+          if [[ ! "$DMG_CONTENT_BYTES" =~ ^[0-9]+$ ]] || (( DMG_CONTENT_BYTES <= 0 )); then
+            echo "ERROR: Could not determine staged macOS DMG content size." >&2
+            exit 1
+          fi
+
+          DMG_HEADROOM_BYTES=$((DMG_CONTENT_BYTES / 2))
+          MIN_DMG_HEADROOM_BYTES=$((64 * 1024 * 1024))
+          if (( DMG_HEADROOM_BYTES < MIN_DMG_HEADROOM_BYTES )); then
+            DMG_HEADROOM_BYTES=$MIN_DMG_HEADROOM_BYTES
+          fi
+          DMG_SIZE_MB=$(( (DMG_CONTENT_BYTES + DMG_HEADROOM_BYTES + 1024 * 1024 - 1) / (1024 * 1024) ))
+
+          echo "Staged DMG content: ${DMG_CONTENT_BYTES} bytes"
+          echo "Explicit hdiutil image size: ${DMG_SIZE_MB} MiB"
 
           # The complete staged .app now lives under RUNNER_TEMP, so the
           # original PyInstaller dist tree is no longer needed.
@@ -400,6 +421,7 @@ jobs:
           hdiutil create \
             -volname "Road Matcher ${PROJECT_VERSION}" \
             -srcfolder "$DMG_ROOT" \
+            -size "${DMG_SIZE_MB}m" \
             -ov \
             -format UDZO \
             "release_asset/${ASSET_NAME}"
