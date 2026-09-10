@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   gate:
-    name: Verify master tests and release metadata
+    name: Verify master tests and read release version
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -38,9 +38,9 @@ jobs:
           import tomllib
           from pathlib import Path
 
-          with Path('pyproject.toml').open('rb') as stream:
+          with Path("pyproject.toml").open("rb") as stream:
               data = tomllib.load(stream)
-          print(data['project']['version'])
+          print(data["project"]["version"])
           PY
           )"
 
@@ -58,9 +58,9 @@ jobs:
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
 
-          echo "Master SHA:    ${MASTER_SHA}"
-          echo "Version:       ${VERSION}"
-          echo "Release tag:   ${RELEASE_TAG}"
+          echo "Master SHA:  ${MASTER_SHA}"
+          echo "Version:     ${VERSION}"
+          echo "Release tag: ${RELEASE_TAG}"
 
       - name: Require successful Tests workflow for this exact master commit
         shell: bash
@@ -71,10 +71,10 @@ jobs:
           set -euo pipefail
 
           RUNS_JSON="$(gh api \
-            -H 'Accept: application/vnd.github+json' \
+            -H "Accept: application/vnd.github+json" \
             "/repos/${GITHUB_REPOSITORY}/actions/workflows/tests.yml/runs?branch=master&head_sha=${MASTER_SHA}&status=completed&per_page=20")"
 
-          LATEST_CONCLUSION="$(printf '%s' "$RUNS_JSON" | jq -r \
+          LATEST_CONCLUSION="$(printf "%s" "$RUNS_JSON" | jq -r \
             '.workflow_runs | sort_by(.run_number) | last | .conclusion // ""')"
 
           if [[ -z "$LATEST_CONCLUSION" ]]; then
@@ -92,7 +92,7 @@ jobs:
           echo "Master unit-test gate passed for ${MASTER_SHA}."
 
   build:
-    name: Build ${{ matrix.label }}
+    name: Build ${{ matrix.label }} · v${{ needs.gate.outputs.version }}
     needs: gate
     strategy:
       fail-fast: false
@@ -100,24 +100,27 @@ jobs:
         include:
           - os: windows-latest
             platform: windows
-            label: Windows x64
-            asset_label: Windows-x64
+            label: Windows x86-64
+            asset_label: Windows-x86_64
             asset_extension: .exe
+
           - os: ubuntu-24.04
             platform: linux
-            label: Ubuntu x64
-            asset_label: Ubuntu-x64
-            asset_extension: .tar.gz
+            label: Ubuntu x86-64
+            asset_label: Ubuntu-x86_64
+            asset_extension: .deb
+
           - os: macos-15
             platform: macos
             label: macOS Apple Silicon
             asset_label: macOS-arm64
-            asset_extension: .tar.gz
+            asset_extension: .dmg
+
           - os: macos-15-intel
             platform: macos
-            label: macOS Intel
-            asset_label: macOS-x64
-            asset_extension: .tar.gz
+            label: macOS Intel x86-64
+            asset_label: macOS-x86_64
+            asset_extension: .dmg
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
@@ -132,6 +135,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Show release metadata
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          echo "Road Matcher version: ${PROJECT_VERSION}"
+          echo "Git revision:         ${SHORT_SHA}"
+          echo "Release asset:        ${ASSET_NAME}"
+
+      - name: Show release metadata
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Write-Host "Road Matcher version: $env:PROJECT_VERSION"
+          Write-Host "Git revision:         $env:SHORT_SHA"
+          Write-Host "Release asset:        $env:ASSET_NAME"
 
       - name: Install Linux Qt runtime libraries
         if: matrix.platform == 'linux'
@@ -152,24 +171,6 @@ jobs:
           auto-activate: true
           miniconda-version: latest
 
-      - name: Pin Linux packaging Python for Expat compatibility
-        if: matrix.platform == 'linux'
-        shell: bash -el {0}
-        run: |
-          set -euo pipefail
-
-          # Python 3.12.14 from the current Conda defaults expects a newer
-          # Expat symbol than Ubuntu 24.04 provides when the one-file bundle
-          # resolves pyexpat. Keep the project on supported Python 3.12, but
-          # use the last known-compatible patch release for this Linux bundle.
-          conda create --yes \
-            --prefix "$GITHUB_WORKSPACE/.venv" \
-            python=3.12.9 \
-            pip
-
-          "$GITHUB_WORKSPACE/.venv/bin/python" -c \
-            "import sys, xml.parsers.expat; print(sys.version); print('pyexpat import passed')"
-
       - name: Install Windows release tools
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -180,48 +181,12 @@ jobs:
           }
           make --version
 
-      - name: Synchronize build version from pyproject metadata
-        shell: python
-        env:
-          PROJECT_VERSION: ${{ needs.gate.outputs.version }}
-        run: |
-          import os
-          import re
-          from pathlib import Path
-
-          version = os.environ['PROJECT_VERSION']
-
-          def replace_once(path_text, pattern, replacement):
-              path = Path(path_text)
-              source = path.read_text(encoding='utf-8')
-              updated, count = re.subn(pattern, replacement, source, count=1)
-              if count != 1:
-                  raise RuntimeError(f'Could not synchronize version in {path}.')
-              path.write_text(updated, encoding='utf-8')
-
-          replace_once(
-              'app/__init__.py',
-              r'__version__\s*=\s*"[^"]+"',
-              f'__version__ = "{version}"',
-          )
-          replace_once(
-              'installer/RoadMatcher.iss',
-              r'#define MyAppVersion\s+"[^"]+"',
-              f'#define MyAppVersion "{version}"',
-          )
-          replace_once(
-              'scripts/project_tasks.py',
-              r'RoadMatcher-Setup-\d+\.\d+\.\d+\.exe',
-              f'RoadMatcher-Setup-{version}.exe',
-          )
-
-          print(f'Build-time version synchronized to {version}.')
-
       - name: Set up project environment on Windows
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          & make setup CONDA=conda 2>&1 | Tee-Object -FilePath release-setup.log
+          & make setup CONDA=conda 2>&1 |
+            Tee-Object -FilePath release-setup.log
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -237,7 +202,8 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          & make publish CONDA=conda 2>&1 | Tee-Object -FilePath build.log
+          & make publish CONDA=conda 2>&1 |
+            Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -248,32 +214,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The gate already requires the exact master commit to have a
-          # successful complete Tests workflow. Do not rerun the same GUI test
-          # suite here; on slower GUI runners, real-time QTimer scheduling can
-          # make timing assertions flaky even though the tested commit passed.
+          # The gate already requires this exact master commit to have a
+          # successful complete Tests workflow. Package that tested revision
+          # without rerunning timing-sensitive GUI tests on release runners.
           "$GITHUB_WORKSPACE/.venv/bin/python" -m PyInstaller \
             --noconfirm \
             --clean \
             "$GITHUB_WORKSPACE/road_matcher.spec" \
             2>&1 | tee build.log
 
-          if [[ ! -f dist/RoadMatcher ]]; then
+          if [[ "${{ matrix.platform }}" == "linux" && ! -f dist/RoadMatcher ]]; then
             echo "ERROR: PyInstaller finished but dist/RoadMatcher was not created." >&2
             exit 1
           fi
 
-      - name: Run frozen GIS smoke test on Ubuntu/macOS
-        if: matrix.platform != 'windows'
+          if [[ "${{ matrix.platform }}" == "macos" && ! -d "dist/Road Matcher.app" ]]; then
+            echo "ERROR: PyInstaller finished but dist/Road Matcher.app was not created." >&2
+            exit 1
+          fi
+
+      - name: Run frozen GIS smoke test on Ubuntu
+        if: matrix.platform == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p build
           rm -f build/packaging-smoke-test.log
 
-          # Run the produced artifact itself after packaging. This keeps the
-          # release fail-closed for Pyogrio/GDAL, PyProj, Shapely and the
-          # Python runtime/native-library bundle.
           set +e
           ROAD_MATCHER_PACKAGING_SMOKE_REPORT="$GITHUB_WORKSPACE/build/packaging-smoke-test.log" \
             "$GITHUB_WORKSPACE/dist/RoadMatcher" --packaging-smoke-test
@@ -281,7 +248,7 @@ jobs:
           set -e
 
           if [[ $smoke_status -ne 0 ]]; then
-            echo "ERROR: Frozen GIS smoke test failed with exit code $smoke_status." >&2
+            echo "ERROR: Frozen Ubuntu GIS smoke test failed with exit code $smoke_status." >&2
             if [[ -f build/packaging-smoke-test.log ]]; then
               echo "----- frozen smoke traceback -----" >&2
               cat build/packaging-smoke-test.log >&2
@@ -289,13 +256,44 @@ jobs:
             exit "$smoke_status"
           fi
 
-          echo "Frozen GIS dependency smoke test passed."
+          echo "Frozen Ubuntu GIS dependency smoke test passed."
 
-      - name: Prepare Windows release asset
+      - name: Run frozen GIS smoke test on macOS
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          rm -f build/packaging-smoke-test.log
+
+          APP_EXE="$GITHUB_WORKSPACE/dist/Road Matcher.app/Contents/MacOS/RoadMatcher"
+          if [[ ! -x "$APP_EXE" ]]; then
+            echo "ERROR: macOS app executable was not found: $APP_EXE" >&2
+            exit 1
+          fi
+
+          set +e
+          ROAD_MATCHER_PACKAGING_SMOKE_REPORT="$GITHUB_WORKSPACE/build/packaging-smoke-test.log" \
+            "$APP_EXE" --packaging-smoke-test
+          smoke_status=$?
+          set -e
+
+          if [[ $smoke_status -ne 0 ]]; then
+            echo "ERROR: Frozen macOS GIS smoke test failed with exit code $smoke_status." >&2
+            if [[ -f build/packaging-smoke-test.log ]]; then
+              echo "----- frozen smoke traceback -----" >&2
+              cat build/packaging-smoke-test.log >&2
+            fi
+            exit "$smoke_status"
+          fi
+
+          echo "Frozen macOS GIS dependency smoke test passed."
+
+      - name: Prepare Windows installer asset
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path release_asset | Out-Null
 
           $source = "installer_output/RoadMatcher-Setup-$env:PROJECT_VERSION.exe"
@@ -306,17 +304,90 @@ jobs:
           Copy-Item $source "release_asset/$env:ASSET_NAME" -Force
           Write-Host "Prepared release_asset/$env:ASSET_NAME"
 
-      - name: Prepare Ubuntu/macOS release asset
-        if: matrix.platform != 'windows'
+      - name: Create Ubuntu DEB installer
+        if: matrix.platform == 'linux'
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release_asset
 
-          tar -czf "release_asset/${ASSET_NAME}" -C dist RoadMatcher
+          PACKAGE_ROOT="$RUNNER_TEMP/road-matcher-deb"
+          rm -rf "$PACKAGE_ROOT"
+          mkdir -p \
+            "$PACKAGE_ROOT/DEBIAN" \
+            "$PACKAGE_ROOT/opt/road-matcher" \
+            "$PACKAGE_ROOT/usr/bin" \
+            "$PACKAGE_ROOT/usr/share/applications" \
+            "$PACKAGE_ROOT/usr/share/icons/hicolor/256x256/apps" \
+            release_asset
+
+          install -m 0755 \
+            "$GITHUB_WORKSPACE/dist/RoadMatcher" \
+            "$PACKAGE_ROOT/opt/road-matcher/RoadMatcher"
+
+          install -m 0644 \
+            "$GITHUB_WORKSPACE/app/resources/road_matcher.png" \
+            "$PACKAGE_ROOT/usr/share/icons/hicolor/256x256/apps/road-matcher.png"
+
+          ln -s /opt/road-matcher/RoadMatcher \
+            "$PACKAGE_ROOT/usr/bin/road-matcher"
+
+          cat > "$PACKAGE_ROOT/usr/share/applications/road-matcher.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=Road Matcher
+          Comment=Road junction verification for two GeoJSON road datasets
+          Exec=/opt/road-matcher/RoadMatcher
+          Icon=road-matcher
+          Terminal=false
+          Categories=Science;Utility;
+          EOF
+
+          cat > "$PACKAGE_ROOT/DEBIAN/control" <<EOF
+          Package: road-matcher
+          Version: ${PROJECT_VERSION}
+          Section: science
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Abrar Jahin
+          Depends: libegl1, libgl1, libxkbcommon-x11-0, libxcb-cursor0, libxcb-xinerama0, libdbus-1-3, libfontconfig1, libfreetype6, libx11-6, libx11-xcb1, libxcb1, libxext6, libxrender1
+          Description: Road Matcher Desktop
+           Desktop road junction verification and GeoJSON matching application.
+          EOF
+
+          dpkg-deb --build --root-owner-group \
+            "$PACKAGE_ROOT" \
+            "release_asset/${ASSET_NAME}"
+
+          dpkg-deb --info "release_asset/${ASSET_NAME}"
           echo "Prepared release_asset/${ASSET_NAME}"
 
-      - name: Upload platform asset for release job
+      - name: Create macOS DMG installer
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_BUNDLE="$GITHUB_WORKSPACE/dist/Road Matcher.app"
+          DMG_ROOT="$RUNNER_TEMP/road-matcher-dmg"
+
+          rm -rf "$DMG_ROOT"
+          mkdir -p "$DMG_ROOT" release_asset
+
+          # ditto preserves the macOS application bundle structure.
+          ditto "$APP_BUNDLE" "$DMG_ROOT/Road Matcher.app"
+          ln -s /Applications "$DMG_ROOT/Applications"
+
+          hdiutil create \
+            -volname "Road Matcher ${PROJECT_VERSION}" \
+            -srcfolder "$DMG_ROOT" \
+            -ov \
+            -format UDZO \
+            "release_asset/${ASSET_NAME}"
+
+          hdiutil imageinfo "release_asset/${ASSET_NAME}" >/dev/null
+          echo "Prepared release_asset/${ASSET_NAME}"
+
+      - name: Upload platform installer for release job
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.asset_label }}
@@ -337,7 +408,7 @@ jobs:
           retention-days: 14
 
   publish:
-    name: Publish GitHub Release
+    name: Publish GitHub Release · v${{ needs.gate.outputs.version }}
     needs:
       - gate
       - build
@@ -345,28 +416,28 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Download all successful platform assets
+      - name: Download all successful platform installers
         uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: release-assets
           merge-multiple: true
 
-      - name: Verify assets and create checksums
+      - name: Verify installers and create checksums
         shell: bash
         run: |
           set -euo pipefail
 
           EXPECTED_ASSETS=(
-            "RoadMatcher-Windows-x64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.exe"
-            "RoadMatcher-Ubuntu-x64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.tar.gz"
-            "RoadMatcher-macOS-arm64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.tar.gz"
-            "RoadMatcher-macOS-x64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.tar.gz"
+            "RoadMatcher-Windows-x86_64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.exe"
+            "RoadMatcher-Ubuntu-x86_64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.deb"
+            "RoadMatcher-macOS-arm64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.dmg"
+            "RoadMatcher-macOS-x86_64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.dmg"
           )
 
           for asset in "${EXPECTED_ASSETS[@]}"; do
             if [[ ! -f "release-assets/${asset}" ]]; then
-              echo "ERROR: Required release asset is missing: ${asset}" >&2
+              echo "ERROR: Required release installer is missing: ${asset}" >&2
               exit 1
             fi
           done
@@ -376,7 +447,7 @@ jobs:
             sha256sum RoadMatcher-* > SHA256SUMS.txt
           )
 
-          echo "Release assets:"
+          echo "Release installers for Road Matcher ${{ needs.gate.outputs.version }}:"
           ls -lh release-assets
 
       - name: Create or update GitHub Release
@@ -389,7 +460,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if ! gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$RELEASE_SHA" \
@@ -407,4 +479,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --draft=false
 
-          echo "Published cross-platform release: $RELEASE_TAG"
+          echo "Published Road Matcher ${{ needs.gate.outputs.version }}: $RELEASE_TAG"

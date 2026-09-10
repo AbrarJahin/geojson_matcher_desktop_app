@@ -1,5 +1,7 @@
 #define MyAppName "Road Matcher"
-#define MyAppVersion "1.3.0"
+#ifndef MyAppVersion
+  #error MyAppVersion must be supplied by the project build command.
+#endif
 #define MyAppPublisher "Road Matcher Research"
 #define MyAppExeName "RoadMatcher.exe"
 #define MyAppUserModelID "RoadMatcher.Research.Desktop"
@@ -27,7 +29,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Source: "..\dist\RoadMatcher.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [InstallDelete]
-; Remove the dependency tree left by pre-1.3 one-folder installations.
+; Remove the dependency tree left by legacy one-folder installations.
 Type: filesandordirs; Name: "{app}\_internal"
 Type: files; Name: "{app}\*.pyd"
 Type: files; Name: "{app}\python*.dll"

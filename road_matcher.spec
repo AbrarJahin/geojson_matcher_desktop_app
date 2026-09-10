@@ -1,4 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
+import re
+import sys
+from pathlib import Path
+
 from PyInstaller.utils.hooks import (
     collect_all,
     collect_data_files,
@@ -6,24 +10,55 @@ from PyInstaller.utils.hooks import (
     collect_dynamic_libs,
 )
 
+# pyproject.toml is the single source of truth for the application version.
+_pyproject_text = Path("pyproject.toml").read_text(encoding="utf-8")
+_version_match = re.search(
+    r'(?m)^\s*version\s*=\s*"([^"]+)"\s*$',
+    _pyproject_text,
+)
+if _version_match is None:
+    raise RuntimeError("Could not read the application version from pyproject.toml.")
+APP_VERSION = _version_match.group(1).strip()
+
 # Scientific/GIS packages carry CRS databases, projection grids, and native
 # libraries that must remain together when the one-file app extracts them.
 datas = []
 for package in ["geopandas", "pyproj", "matplotlib"]:
     datas += collect_data_files(package, include_py_files=False)
 
-# Application branding used by Qt at runtime.  Bundle the ICO as data too so
-# Windows can use the same multi-resolution icon for the live taskbar window.
+# Application branding plus the single version-source file. The frozen app
+# reads this bundled pyproject.toml when it reports its version.
 datas += [
     ("app/resources/road_matcher.png", "app/resources"),
     ("app/resources/road_matcher.ico", "app/resources"),
+    ("pyproject.toml", "."),
 ]
 
 binaries = []
 for package in ["pyproj", "shapely"]:
     binaries += collect_dynamic_libs(package)
 
-# GeoPandas loads Pyogrio dynamically.  Collect the complete package rather
+# Conda Python's pyexpat extension can be linked against a newer Expat than
+# the Linux host provides. The source interpreter works because its matching
+# libexpat lives inside the Conda prefix; bundle that exact library so the
+# frozen executable resolves the same ABI instead of an older system libexpat.
+if sys.platform.startswith("linux"):
+    expat_candidates = [
+        Path(sys.prefix) / "lib" / "libexpat.so.1",
+        *sorted((Path(sys.prefix) / "lib").glob("libexpat.so.1.*")),
+    ]
+    conda_expat = next(
+        (candidate for candidate in expat_candidates if candidate.is_file()),
+        None,
+    )
+    if conda_expat is None:
+        raise RuntimeError(
+            "The active Linux Conda environment does not contain libexpat.so.1; "
+            "refusing to build a potentially broken frozen application."
+        )
+    binaries.append((str(conda_expat), "."))
+
+# GeoPandas loads Pyogrio dynamically. Collect the complete package rather
 # than only pyogrio._io so its Python modules and GDAL data are retained.
 pyogrio_datas, pyogrio_binaries, pyogrio_hiddenimports = collect_all("pyogrio")
 datas += pyogrio_datas
@@ -89,3 +124,21 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+
+# On macOS, wrap the same frozen application in the standard .app bundle
+# expected inside a drag-and-drop DMG. No application logic changes.
+if sys.platform == "darwin":
+    app = BUNDLE(
+        exe,
+        name="Road Matcher.app",
+        icon="app/resources/road_matcher.ico",
+        bundle_identifier="me.ajahin.roadmatcher",
+        version=APP_VERSION,
+        info_plist={
+            "CFBundleDisplayName": "Road Matcher",
+            "CFBundleName": "Road Matcher",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
+            "NSHighResolutionCapable": True,
+        },
+    )

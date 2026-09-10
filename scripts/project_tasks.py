@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,18 +23,55 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 CommandPart = Union[str, os.PathLike]
 
 ROOT = Path(__file__).resolve().parents[1]
+PYPROJECT_FILE = ROOT / "pyproject.toml"
 SPEC_FILE = ROOT / "road_matcher.spec"
 INNO_SCRIPT = ROOT / "installer" / "RoadMatcher.iss"
 DIST_EXE = ROOT / "dist" / (
     "RoadMatcher.exe" if os.name == "nt" else "RoadMatcher"
 )
-INSTALLER_OUTPUT = ROOT / "installer_output" / "RoadMatcher-Setup-1.3.0.exe"
 PACKAGING_SMOKE_TEST_ARGUMENT = "--packaging-smoke-test"
 PACKAGING_SMOKE_REPORT = ROOT / "build" / "packaging-smoke-test.log"
 
 CONDA_PYTHON_VERSION = os.environ.get(
     "ROAD_MATCHER_PYTHON_VERSION", "3.12"
 ).strip()
+
+
+def project_version() -> str:
+    """Read the application version from pyproject.toml.
+
+    Keep this bootstrap helper Python 3.9 compatible; tomllib is unavailable
+    there, and the project version is deliberately a simple X.Y.Z value.
+    """
+
+    try:
+        text = PYPROJECT_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            "Could not read project version metadata: {0}".format(PYPROJECT_FILE)
+        ) from exc
+
+    match = re.search(
+        r'(?m)^\s*version\s*=\s*"([^"]+)"\s*$',
+        text,
+    )
+    if match is None:
+        raise RuntimeError(
+            "pyproject.toml does not contain a project version."
+        )
+
+    value = match.group(1).strip()
+    if re.fullmatch(r"\d+\.\d+\.\d+", value) is None:
+        raise RuntimeError(
+            "Project version must use X.Y.Z format. Received: {0}".format(value)
+        )
+    return value
+
+
+PROJECT_VERSION = project_version()
+INSTALLER_OUTPUT = (
+    ROOT / "installer_output" / "RoadMatcher-Setup-{0}.exe".format(PROJECT_VERSION)
+)
 
 
 def _configured_prefix() -> Path:
@@ -104,7 +142,7 @@ def conda_executable() -> str:
     raise RuntimeError(
         "Conda was not found. Run Make with the Conda executable path, for "
         "example: make setup "
-        "CONDA=\"C:/tools/miniconda3/Scripts/conda.exe\""
+        'CONDA="C:/tools/miniconda3/Scripts/conda.exe"'
     )
 
 
@@ -315,6 +353,7 @@ def setup() -> None:
     print("\nConda setup completed successfully.")
     print("Environment prefix: {0}".format(CONDA_PREFIX))
     print("Python executable: {0}".format(info.get("executable")))
+    print("Project version: {0}".format(PROJECT_VERSION))
     print("Start the application with: make run")
 
 
@@ -509,7 +548,7 @@ def find_iscc() -> Path:
     raise RuntimeError(
         "Inno Setup 6 compiler (ISCC.exe) was not found. Install Inno Setup 6, "
         "put ISCC.exe on PATH, or run: make installer "
-        "ISCC_EXE=\"C:/Program Files (x86)/Inno Setup 6/ISCC.exe\""
+        'ISCC_EXE="C:/Program Files (x86)/Inno Setup 6/ISCC.exe"'
     )
 
 
@@ -523,7 +562,13 @@ def compile_installer() -> None:
             "'make installer'.".format(DIST_EXE)
         )
     iscc = find_iscc()
-    run_command([iscc, str(INNO_SCRIPT)])
+    run_command(
+        [
+            iscc,
+            '--define=MyAppVersion="{0}"'.format(PROJECT_VERSION),
+            str(INNO_SCRIPT),
+        ]
+    )
     if not INSTALLER_OUTPUT.exists():
         raise RuntimeError(
             "Inno Setup completed but the expected installer was not found: {0}"
@@ -618,6 +663,7 @@ def doctor() -> None:
     version_result = capture_command([conda, "--version"])
     print("Road Matcher environment diagnostics")
     print("Project root: {0}".format(ROOT))
+    print("Project version: {0}".format(PROJECT_VERSION))
     print("Conda executable: {0}".format(conda))
     print("Conda version: {0}".format(version_result.stdout.strip()))
     print("Configured local prefix: {0}".format(CONDA_PREFIX))
@@ -649,7 +695,7 @@ def show_help() -> None:
   make run             Launch the PySide6 desktop application
   make test            Run the automated test suite
   make verify          Run pip check, tests, and compilation checks
-  make build           Test and create dist/RoadMatcher.exe
+  make build           Test and create dist/RoadMatcher[.exe]
   make installer       Build and compile the Inno Setup installer
   make installer-only  Compile installer from an existing app build
   make clean           Remove build outputs and project Python caches
