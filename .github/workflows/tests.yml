@@ -13,9 +13,12 @@ permissions:
 
 jobs:
   test:
-    name: test
+    name: Unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTEST_ADDOPTS: "--tb=long -ra"
     defaults:
       run:
         shell: bash -el {0}
@@ -31,8 +34,31 @@ jobs:
           auto-activate: true
           miniconda-version: latest
 
+      - name: Verify Conda command
+        run: |
+          set -euo pipefail
+          echo "setup-miniconda installation root: ${CONDA:-<not-set>}"
+          echo "Make will explicitly use the conda executable from PATH."
+          command -v conda
+          conda --version
+
       - name: Set up project environment
-        run: make setup
+        run: |
+          set -euo pipefail
+          make setup CONDA=conda 2>&1 | tee setup.log
 
       - name: Run complete unit test suite
-        run: make test
+        run: |
+          set -euo pipefail
+          make test CONDA=conda 2>&1 | tee pytest.log
+
+      - name: Upload test logs after a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-logs-${{ github.run_id }}
+          path: |
+            setup.log
+            pytest.log
+          if-no-files-found: ignore
+          retention-days: 14

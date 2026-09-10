@@ -139,16 +139,39 @@ class UpdatedMapDialog(QDialog):
     ) -> tuple[float, float, float, float]:
         """Return padded Web-Mercator bounds covering both finalized layers."""
 
-        bounds_1 = first.total_bounds
-        bounds_2 = second.total_bounds
-        west = min(float(bounds_1[0]), float(bounds_2[0]))
-        south = min(float(bounds_1[1]), float(bounds_2[1]))
-        east = max(float(bounds_1[2]), float(bounds_2[2]))
-        north = max(float(bounds_1[3]), float(bounds_2[3]))
+        def validated_bounds(
+            frame: gpd.GeoDataFrame,
+            layer_name: str,
+        ) -> tuple[float, float, float, float]:
+            try:
+                values = tuple(float(value) for value in frame.total_bounds)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{layer_name} contains invalid map-bound coordinates."
+                ) from exc
 
-        values = (west, south, east, north)
-        if not all(math.isfinite(value) for value in values):
-            raise ValueError("Updated GeoJSON bounds contain non-finite coordinates.")
+            if len(values) != 4:
+                raise ValueError(
+                    f"{layer_name} did not provide the expected four map bounds."
+                )
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError(
+                    f"{layer_name} bounds contain non-finite coordinates."
+                )
+
+            west, south, east, north = values
+            if west > east or south > north:
+                raise ValueError(
+                    f"{layer_name} bounds have an invalid extent ordering."
+                )
+            return west, south, east, north
+
+        bounds_1 = validated_bounds(first, "Updated GeoJSON 1")
+        bounds_2 = validated_bounds(second, "Updated GeoJSON 2")
+        west = min(bounds_1[0], bounds_2[0])
+        south = min(bounds_1[1], bounds_2[1])
+        east = max(bounds_1[2], bounds_2[2])
+        north = max(bounds_1[3], bounds_2[3])
 
         width = max(east - west, 1.0)
         height = max(north - south, 1.0)

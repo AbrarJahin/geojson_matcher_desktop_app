@@ -1,0 +1,101 @@
+name: Release Windows Installer
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    name: Test, build, and attach installer
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTEST_ADDOPTS: "--tb=long -ra"
+
+    steps:
+      - name: Check out released tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Conda
+        uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: ""
+          auto-activate: true
+          miniconda-version: latest
+
+      - name: Install GNU Make and Inno Setup
+        shell: pwsh
+        run: |
+          choco install make innosetup -y --no-progress
+          make --version
+
+      - name: Verify Conda command
+        shell: pwsh
+        run: |
+          Write-Host "setup-miniconda installation root: $env:CONDA"
+          Write-Host "Make will explicitly use the conda executable from PATH."
+          Get-Command conda
+          conda --version
+
+      - name: Set up project environment
+        shell: pwsh
+        run: |
+          & make setup CONDA=conda 2>&1 | Tee-Object -FilePath release-setup.log
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Run publish gate and build installer
+        shell: pwsh
+        run: |
+          & make publish CONDA=conda 2>&1 | Tee-Object -FilePath publish.log
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Locate generated installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem `
+            -Path installer_output `
+            -Filter "RoadMatcher-Setup-*.exe" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if ($null -eq $installer) {
+            throw "No RoadMatcher installer EXE was found in installer_output."
+          }
+
+          "INSTALLER_PATH=$($installer.FullName)" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Installer ready: $($installer.FullName)"
+
+      - name: Attach installer EXE to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload `
+            "${{ github.event.release.tag_name }}" `
+            "$env:INSTALLER_PATH" `
+            --clobber
+
+      - name: Upload release logs after a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-build-logs-${{ github.run_id }}
+          path: |
+            release-setup.log
+            publish.log
+            build/packaging-smoke-test.log
+          if-no-files-found: ignore
+          retention-days: 14
