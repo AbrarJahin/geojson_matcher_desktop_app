@@ -123,7 +123,6 @@ jobs:
     timeout-minutes: 75
     env:
       QT_QPA_PLATFORM: offscreen
-      PYTEST_ADDOPTS: "--tb=long -ra"
       PROJECT_VERSION: ${{ needs.gate.outputs.version }}
       SHORT_SHA: ${{ needs.gate.outputs.short_sha }}
       ASSET_NAME: RoadMatcher-${{ matrix.asset_label }}-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}${{ matrix.asset_extension }}
@@ -152,6 +151,24 @@ jobs:
           activate-environment: ""
           auto-activate: true
           miniconda-version: latest
+
+      - name: Pin Linux packaging Python for Expat compatibility
+        if: matrix.platform == 'linux'
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+
+          # Python 3.12.14 from the current Conda defaults expects a newer
+          # Expat symbol than Ubuntu 24.04 provides when the one-file bundle
+          # resolves pyexpat. Keep the project on supported Python 3.12, but
+          # use the last known-compatible patch release for this Linux bundle.
+          conda create --yes \
+            --prefix "$GITHUB_WORKSPACE/.venv" \
+            python=3.12.9 \
+            pip
+
+          "$GITHUB_WORKSPACE/.venv/bin/python" -c \
+            "import sys, xml.parsers.expat; print(sys.version); print('pyexpat import passed')"
 
       - name: Install Windows release tools
         if: matrix.platform == 'windows'
@@ -225,12 +242,54 @@ jobs:
             exit $LASTEXITCODE
           }
 
-      - name: Test, build, and smoke-test standalone Unix application
+      - name: Build standalone Ubuntu/macOS application
         if: matrix.platform != 'windows'
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          make build CONDA=conda 2>&1 | tee build.log
+
+          # The gate already requires the exact master commit to have a
+          # successful complete Tests workflow. Do not rerun the same GUI test
+          # suite here; on slower GUI runners, real-time QTimer scheduling can
+          # make timing assertions flaky even though the tested commit passed.
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m PyInstaller \
+            --noconfirm \
+            --clean \
+            "$GITHUB_WORKSPACE/road_matcher.spec" \
+            2>&1 | tee build.log
+
+          if [[ ! -f dist/RoadMatcher ]]; then
+            echo "ERROR: PyInstaller finished but dist/RoadMatcher was not created." >&2
+            exit 1
+          fi
+
+      - name: Run frozen GIS smoke test on Ubuntu/macOS
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          rm -f build/packaging-smoke-test.log
+
+          # Run the produced artifact itself after packaging. This keeps the
+          # release fail-closed for Pyogrio/GDAL, PyProj, Shapely and the
+          # Python runtime/native-library bundle.
+          set +e
+          ROAD_MATCHER_PACKAGING_SMOKE_REPORT="$GITHUB_WORKSPACE/build/packaging-smoke-test.log" \
+            "$GITHUB_WORKSPACE/dist/RoadMatcher" --packaging-smoke-test
+          smoke_status=$?
+          set -e
+
+          if [[ $smoke_status -ne 0 ]]; then
+            echo "ERROR: Frozen GIS smoke test failed with exit code $smoke_status." >&2
+            if [[ -f build/packaging-smoke-test.log ]]; then
+              echo "----- frozen smoke traceback -----" >&2
+              cat build/packaging-smoke-test.log >&2
+            fi
+            exit "$smoke_status"
+          fi
+
+          echo "Frozen GIS dependency smoke test passed."
 
       - name: Prepare Windows release asset
         if: matrix.platform == 'windows'
@@ -253,11 +312,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release_asset
-
-          if [[ ! -f dist/RoadMatcher ]]; then
-            echo "ERROR: Expected standalone application dist/RoadMatcher was not created." >&2
-            exit 1
-          fi
 
           tar -czf "release_asset/${ASSET_NAME}" -C dist RoadMatcher
           echo "Prepared release_asset/${ASSET_NAME}"
