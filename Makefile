@@ -37,7 +37,7 @@ BASE_PYTHON := "$(CONDA)" run --no-capture-output --name base python
 ENV_PYTHON := "$(CONDA)" run --no-capture-output --prefix "$(ENV_PREFIX)" python
 
 .PHONY: help check-conda check-env doctor setup run test verify build \
-        installer installer-only clean distclean rebuild
+        installer installer-only publish clean distclean rebuild
 
 help:
 	@echo Road Matcher Desktop - project-local Conda commands
@@ -49,6 +49,7 @@ help:
 	@echo   make build           Create dist/RoadMatcher.exe
 	@echo   make installer       Build the app and create the Windows installer
 	@echo   make installer-only  Create installer from an existing app build
+	@echo   make publish         Test first; publish installer only if tests pass
 	@echo   make clean           Remove build outputs and project Python caches
 	@echo   make distclean       Clean and remove the local .venv Conda environment
 	@echo   make rebuild         Clean, test, and rebuild the application
@@ -63,6 +64,7 @@ help:
 	@echo   make setup
 	@echo   make setup CONDA="C:/tools/miniconda3/Scripts/conda.exe"
 	@echo   make installer ISCC_EXE="C:/Program Files (x86)/Inno Setup 6/ISCC.exe"
+	@echo   make publish ISCC_EXE="C:/Program Files (x86)/Inno Setup 6/ISCC.exe"
 
 check-conda:
 	@"$(CONDA)" --version >$(NULL_DEVICE) 2>&1 || (echo ERROR: Conda command "$(CONDA)" was not found. && echo Use the full executable path, for example: && echo make setup CONDA="C:/tools/miniconda3/Scripts/conda.exe" && exit 1)
@@ -93,6 +95,17 @@ installer: check-env
 
 installer-only: check-env
 	@$(ENV_PYTHON) $(TASK_RUNNER) installer-only
+
+# "publish" is intentionally a fail-closed release gate. The first substantive
+# operation is the complete unit-test command. If it fails, Make exits here and
+# the installer/build command is never invoked. The existing installer command
+# retains its own internal test/build/smoke-test checks as a second safety net.
+publish: check-env
+	@echo Publish gate: running the complete unit-test suite before packaging...
+	@$(ENV_PYTHON) $(TASK_RUNNER) test || (echo PUBLISH FAILED: Unit tests failed. No publish/build step was started. && exit 1)
+	@echo Publish gate passed: all unit tests succeeded. Building the release installer...
+	@$(ENV_PYTHON) $(TASK_RUNNER) installer || (echo PUBLISH FAILED: Release packaging failed after the tests passed. && exit 1)
+	@echo PUBLISH SUCCEEDED: All unit tests passed and the Windows installer was created.
 
 clean: check-conda
 	@$(BASE_PYTHON) $(TASK_RUNNER) clean

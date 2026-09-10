@@ -34,5 +34,5 @@ jobs:
       - name: Set up project environment
         run: make setup
 
-      - name: Run existing tests
+      - name: Run complete unit test suite
         run: make test

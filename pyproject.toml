@@ -27,4 +27,4 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --ignore=tests/test_legacy_program.py"
+addopts = "-q"
