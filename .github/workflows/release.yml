@@ -1,136 +1,160 @@
-name: Automatic Windows Release
+name: Manual Cross-Platform Release
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - pyproject.toml
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
-  release:
-    name: Version-gated Windows release
-    runs-on: windows-latest
+  gate:
+    name: Verify master tests and release metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.metadata.outputs.sha }}
+      short_sha: ${{ steps.metadata.outputs.short_sha }}
+      version: ${{ steps.metadata.outputs.version }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+      release_title: ${{ steps.metadata.outputs.release_title }}
+
+    steps:
+      - name: Check out current master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Read version and Git revision
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MASTER_SHA="$(git rev-parse HEAD)"
+          SHORT_SHA="${MASTER_SHA:0:4}"
+          VERSION="$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          with Path('pyproject.toml').open('rb') as stream:
+              data = tomllib.load(stream)
+          print(data['project']['version'])
+          PY
+          )"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: pyproject.toml version must use X.Y.Z format; found '$VERSION'." >&2
+            exit 1
+          fi
+
+          RELEASE_TAG="v${VERSION}+${SHORT_SHA}"
+          RELEASE_TITLE="Road Matcher ${VERSION} (${SHORT_SHA})"
+
+          echo "sha=${MASTER_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
+
+          echo "Master SHA:    ${MASTER_SHA}"
+          echo "Version:       ${VERSION}"
+          echo "Release tag:   ${RELEASE_TAG}"
+
+      - name: Require successful Tests workflow for this exact master commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MASTER_SHA: ${{ steps.metadata.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          RUNS_JSON="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/tests.yml/runs?branch=master&head_sha=${MASTER_SHA}&status=completed&per_page=20")"
+
+          LATEST_CONCLUSION="$(printf '%s' "$RUNS_JSON" | jq -r \
+            '.workflow_runs | sort_by(.run_number) | last | .conclusion // ""')"
+
+          if [[ -z "$LATEST_CONCLUSION" ]]; then
+            echo "ERROR: No completed Tests workflow was found for master commit ${MASTER_SHA}." >&2
+            echo "Wait for the master Tests workflow to finish successfully, then run this release workflow again." >&2
+            exit 1
+          fi
+
+          if [[ "$LATEST_CONCLUSION" != "success" ]]; then
+            echo "ERROR: The latest Tests workflow for master commit ${MASTER_SHA} concluded '${LATEST_CONCLUSION}', not 'success'." >&2
+            echo "No release will be built or published." >&2
+            exit 1
+          fi
+
+          echo "Master unit-test gate passed for ${MASTER_SHA}."
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            label: Windows x64
+            asset_label: Windows-x64
+            asset_extension: .exe
+          - os: ubuntu-24.04
+            platform: linux
+            label: Ubuntu x64
+            asset_label: Ubuntu-x64
+            asset_extension: .tar.gz
+          - os: macos-15
+            platform: macos
+            label: macOS Apple Silicon
+            asset_label: macOS-arm64
+            asset_extension: .tar.gz
+          - os: macos-15-intel
+            platform: macos
+            label: macOS Intel
+            asset_label: macOS-x64
+            asset_extension: .tar.gz
+
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     env:
       QT_QPA_PLATFORM: offscreen
       PYTEST_ADDOPTS: "--tb=long -ra"
+      PROJECT_VERSION: ${{ needs.gate.outputs.version }}
+      SHORT_SHA: ${{ needs.gate.outputs.short_sha }}
+      ASSET_NAME: RoadMatcher-${{ matrix.asset_label }}-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}${{ matrix.asset_extension }}
 
     steps:
-      - name: Check out master revision
+      - name: Check out tested master commit
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ needs.gate.outputs.sha }}
 
-      - name: Detect pyproject version change
-        id: version
-        shell: pwsh
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
-          CURRENT_SHA: ${{ github.sha }}
+      - name: Install Linux Qt runtime libraries
+        if: matrix.platform == 'linux'
+        shell: bash
         run: |
-          $ErrorActionPreference = "Stop"
-
-          $currentText = Get-Content "pyproject.toml" -Raw
-          $currentMatch = [regex]::Match(
-            $currentText,
-            '(?m)^\s*version\s*=\s*"([^"]+)"\s*$'
-          )
-          if (-not $currentMatch.Success) {
-            throw 'Could not find [project] version = "..." in pyproject.toml.'
-          }
-
-          $version = $currentMatch.Groups[1].Value.Trim()
-          if ($version -notmatch '^\d+\.\d+\.\d+$') {
-            throw "Release versions must use X.Y.Z format. Found: $version"
-          }
-
-          $previousVersion = ""
-          $versionChanged = $false
-
-          if ($env:EVENT_NAME -eq "workflow_dispatch") {
-            # Manual runs are an explicit request to release the current
-            # pyproject version, even when that version did not just change.
-            $versionChanged = $true
-            $previousVersion = "<manual run>"
-          }
-          elseif (
-            [string]::IsNullOrWhiteSpace($env:BEFORE_SHA) -or
-            $env:BEFORE_SHA -match '^0+$'
-          ) {
-            # Defensive fallback for an unusual first push/new-history event.
-            $versionChanged = $true
-            $previousVersion = "<unavailable>"
-          }
-          else {
-            $previousText = git show "${env:BEFORE_SHA}:pyproject.toml" 2>$null
-            if ($LASTEXITCODE -ne 0) {
-              throw "Could not read pyproject.toml from the pre-push revision $env:BEFORE_SHA."
-            }
-
-            $previousMatch = [regex]::Match(
-              ($previousText -join "`n"),
-              '(?m)^\s*version\s*=\s*"([^"]+)"\s*$'
-            )
-            if (-not $previousMatch.Success) {
-              throw "Could not read the previous project version."
-            }
-
-            $previousVersion = $previousMatch.Groups[1].Value.Trim()
-            $versionChanged = $previousVersion -ne $version
-          }
-
-          $shortSha = $env:CURRENT_SHA.Substring(0, 4).ToLowerInvariant()
-
-          # '+' is SemVer build-metadata syntax. The requested four-character
-          # Git abbreviation therefore does not turn the release into a
-          # prerelease (which a '-' suffix would do).
-          $releaseTag = "v$version+$shortSha"
-          $releaseTitle = "Road Matcher $version ($shortSha)"
-          $assetName = "RoadMatcher-Setup-$version-$shortSha.exe"
-
-          "changed=$($versionChanged.ToString().ToLowerInvariant())" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "version=$version" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "previous_version=$previousVersion" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "short_sha=$shortSha" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "release_tag=$releaseTag" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "release_title=$releaseTitle" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "asset_name=$assetName" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-          Write-Host "Previous version: $previousVersion"
-          Write-Host "Current version:  $version"
-          Write-Host "Version changed:  $versionChanged"
-          Write-Host "Release tag:      $releaseTag"
-
-      - name: No release needed
-        if: steps.version.outputs.changed != 'true'
-        shell: pwsh
-        run: |
-          Write-Host "pyproject.toml changed, but its project version did not."
-          Write-Host "No installer or GitHub Release will be created."
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 \
+            libgl1 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0
 
       - name: Set up Conda
-        if: steps.version.outputs.changed == 'true'
         uses: conda-incubator/setup-miniconda@v4
         with:
           activate-environment: ""
           auto-activate: true
           miniconda-version: latest
 
-      - name: Install GNU Make and Inno Setup
-        if: steps.version.outputs.changed == 'true'
+      - name: Install Windows release tools
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           choco install make innosetup -y --no-progress
@@ -139,181 +163,194 @@ jobs:
           }
           make --version
 
-      - name: Verify release tools
-        if: steps.version.outputs.changed == 'true'
-        shell: pwsh
-        run: |
-          Write-Host "setup-miniconda installation root: $env:CONDA"
-          Write-Host "Make will explicitly use the conda executable from PATH."
-          Get-Command conda
-          conda --version
-          Get-Command make
-          Get-Command gh
-          gh --version
-
-      - name: Synchronize build version from pyproject
-        if: steps.version.outputs.changed == 'true'
-        shell: pwsh
+      - name: Synchronize build version from pyproject metadata
+        shell: python
         env:
-          PROJECT_VERSION: ${{ steps.version.outputs.version }}
+          PROJECT_VERSION: ${{ needs.gate.outputs.version }}
         run: |
-          $ErrorActionPreference = "Stop"
-          $version = $env:PROJECT_VERSION
+          import os
+          import re
+          from pathlib import Path
 
-          # pyproject.toml is the release source of truth. The repository's
-          # current build files still contain a mirrored numeric version, so
-          # synchronize those copies only inside this ephemeral runner checkout.
-          # Nothing is committed back to master.
+          version = os.environ['PROJECT_VERSION']
 
-          $appInitPath = "app/__init__.py"
-          $appInit = Get-Content $appInitPath -Raw
-          $updatedAppInit = [regex]::Replace(
-            $appInit,
-            '__version__\s*=\s*"[^"]+"',
-            "__version__ = `"$version`"",
-            1
+          def replace_once(path_text, pattern, replacement):
+              path = Path(path_text)
+              source = path.read_text(encoding='utf-8')
+              updated, count = re.subn(pattern, replacement, source, count=1)
+              if count != 1:
+                  raise RuntimeError(f'Could not synchronize version in {path}.')
+              path.write_text(updated, encoding='utf-8')
+
+          replace_once(
+              'app/__init__.py',
+              r'__version__\s*=\s*"[^"]+"',
+              f'__version__ = "{version}"',
           )
-          if ($updatedAppInit -eq $appInit -and $appInit -notmatch [regex]::Escape("__version__ = `"$version`"")) {
-            throw "Could not synchronize app/__init__.py version."
-          }
-          Set-Content -Path $appInitPath -Value $updatedAppInit -Encoding utf8 -NoNewline
-
-          $issPath = "installer/RoadMatcher.iss"
-          $iss = Get-Content $issPath -Raw
-          $updatedIss = [regex]::Replace(
-            $iss,
-            '#define MyAppVersion\s+"[^"]+"',
-            "#define MyAppVersion `"$version`"",
-            1
+          replace_once(
+              'installer/RoadMatcher.iss',
+              r'#define MyAppVersion\s+"[^"]+"',
+              f'#define MyAppVersion "{version}"',
           )
-          if ($updatedIss -eq $iss -and $iss -notmatch [regex]::Escape("#define MyAppVersion `"$version`"")) {
-            throw "Could not synchronize installer/RoadMatcher.iss version."
-          }
-          Set-Content -Path $issPath -Value $updatedIss -Encoding utf8 -NoNewline
-
-          $tasksPath = "scripts/project_tasks.py"
-          $tasks = Get-Content $tasksPath -Raw
-          $expectedInstaller = "RoadMatcher-Setup-$version.exe"
-          $updatedTasks = [regex]::Replace(
-            $tasks,
-            'RoadMatcher-Setup-\d+\.\d+\.\d+\.exe',
-            $expectedInstaller,
-            1
+          replace_once(
+              'scripts/project_tasks.py',
+              r'RoadMatcher-Setup-\d+\.\d+\.\d+\.exe',
+              f'RoadMatcher-Setup-{version}.exe',
           )
-          if ($updatedTasks -eq $tasks -and $tasks -notmatch [regex]::Escape($expectedInstaller)) {
-            throw "Could not synchronize scripts/project_tasks.py installer filename."
-          }
-          Set-Content -Path $tasksPath -Value $updatedTasks -Encoding utf8 -NoNewline
 
-          Write-Host "Build-time version synchronized to $version."
-          Write-Host "Source of truth remains pyproject.toml."
+          print(f'Build-time version synchronized to {version}.')
 
-      - name: Set up project environment
-        if: steps.version.outputs.changed == 'true'
+      - name: Set up project environment on Windows
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          & make setup CONDA=conda 2>&1 |
-            Tee-Object -FilePath release-setup.log
+          & make setup CONDA=conda 2>&1 | Tee-Object -FilePath release-setup.log
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
 
-      - name: Run tests, build, smoke test, and installer
-        if: steps.version.outputs.changed == 'true'
+      - name: Set up project environment on Unix
+        if: matrix.platform != 'windows'
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          make setup CONDA=conda 2>&1 | tee release-setup.log
+
+      - name: Test, build, smoke-test, and create Windows installer
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          & make publish CONDA=conda 2>&1 |
-            Tee-Object -FilePath publish.log
+          & make publish CONDA=conda 2>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
 
-      - name: Prepare versioned installer asset
-        if: steps.version.outputs.changed == 'true'
-        id: installer
-        shell: pwsh
-        env:
-          PROJECT_VERSION: ${{ steps.version.outputs.version }}
-          ASSET_NAME: ${{ steps.version.outputs.asset_name }}
+      - name: Test, build, and smoke-test standalone Unix application
+        if: matrix.platform != 'windows'
+        shell: bash -el {0}
         run: |
-          $ErrorActionPreference = "Stop"
+          set -euo pipefail
+          make build CONDA=conda 2>&1 | tee build.log
 
-          $expectedName = "RoadMatcher-Setup-$env:PROJECT_VERSION.exe"
-          $source = Join-Path "installer_output" $expectedName
+      - name: Prepare Windows release asset
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release_asset | Out-Null
 
+          $source = "installer_output/RoadMatcher-Setup-$env:PROJECT_VERSION.exe"
           if (-not (Test-Path $source -PathType Leaf)) {
-            throw "Expected installer was not created: $source"
+            throw "Expected Windows installer was not created: $source"
           }
 
-          $asset = Join-Path "installer_output" $env:ASSET_NAME
-          Copy-Item $source $asset -Force
+          Copy-Item $source "release_asset/$env:ASSET_NAME" -Force
+          Write-Host "Prepared release_asset/$env:ASSET_NAME"
 
-          $fullAssetPath = (Resolve-Path $asset).Path
-          "asset_path=$fullAssetPath" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-          Write-Host "GitHub Release asset: $fullAssetPath"
-
-      - name: Create or update GitHub Release
-        if: steps.version.outputs.changed == 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
-          RELEASE_TITLE: ${{ steps.version.outputs.release_title }}
-          INSTALLER_ASSET: ${{ steps.installer.outputs.asset_path }}
+      - name: Prepare Ubuntu/macOS release asset
+        if: matrix.platform != 'windows'
+        shell: bash
         run: |
-          $ErrorActionPreference = "Stop"
+          set -euo pipefail
+          mkdir -p release_asset
 
-          gh release view "$env:RELEASE_TAG" `
-            --repo "$env:GITHUB_REPOSITORY" *> $null
+          if [[ ! -f dist/RoadMatcher ]]; then
+            echo "ERROR: Expected standalone application dist/RoadMatcher was not created." >&2
+            exit 1
+          fi
 
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Creating draft GitHub Release $env:RELEASE_TAG ..."
-            gh release create "$env:RELEASE_TAG" `
-              --repo "$env:GITHUB_REPOSITORY" `
-              --target "$env:GITHUB_SHA" `
-              --title "$env:RELEASE_TITLE" `
-              --generate-notes `
-              --draft
+          tar -czf "release_asset/${ASSET_NAME}" -C dist RoadMatcher
+          echo "Prepared release_asset/${ASSET_NAME}"
 
-            if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-            }
-          }
-          else {
-            Write-Host "Release already exists; replacing its installer asset."
-          }
-
-          gh release upload "$env:RELEASE_TAG" `
-            "$env:INSTALLER_ASSET" `
-            --repo "$env:GITHUB_REPOSITORY" `
-            --clobber
-
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-
-          # Publish only after the installer asset was uploaded successfully,
-          # so users do not see an empty/half-created release.
-          gh release edit "$env:RELEASE_TAG" `
-            --repo "$env:GITHUB_REPOSITORY" `
-            --draft=false
-
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-
-          Write-Host "Published GitHub Release: $env:RELEASE_TAG"
-
-      - name: Upload release diagnostics after a failure
-        if: failure() && steps.version.outputs.changed == 'true'
+      - name: Upload platform asset for release job
         uses: actions/upload-artifact@v4
         with:
-          name: release-build-logs-${{ github.run_id }}
+          name: release-${{ matrix.asset_label }}
+          path: release_asset/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build diagnostics after a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-build-logs-${{ matrix.asset_label }}-${{ github.run_id }}
           path: |
             release-setup.log
-            publish.log
+            build.log
             build/packaging-smoke-test.log
           if-no-files-found: ignore
           retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - gate
+      - build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Download all successful platform assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify assets and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED_ASSETS=(
+            "RoadMatcher-Windows-x64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.exe"
+            "RoadMatcher-Ubuntu-x64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.tar.gz"
+            "RoadMatcher-macOS-arm64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.tar.gz"
+            "RoadMatcher-macOS-x64-${{ needs.gate.outputs.version }}-${{ needs.gate.outputs.short_sha }}.tar.gz"
+          )
+
+          for asset in "${EXPECTED_ASSETS[@]}"; do
+            if [[ ! -f "release-assets/${asset}" ]]; then
+              echo "ERROR: Required release asset is missing: ${asset}" >&2
+              exit 1
+            fi
+          done
+
+          (
+            cd release-assets
+            sha256sum RoadMatcher-* > SHA256SUMS.txt
+          )
+
+          echo "Release assets:"
+          ls -lh release-assets
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+          RELEASE_TITLE: ${{ needs.gate.outputs.release_title }}
+          RELEASE_SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$RELEASE_SHA" \
+              --title "$RELEASE_TITLE" \
+              --generate-notes \
+              --draft
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
+
+          echo "Published cross-platform release: $RELEASE_TAG"
