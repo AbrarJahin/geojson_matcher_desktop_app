@@ -4,15 +4,9 @@ on:
   push:
     branches:
       - master
-    paths-ignore:
-      - 'AGENTS.md'
-      - 'specs/research/**'
   pull_request:
     branches:
       - master
-    paths-ignore:
-      - 'AGENTS.md'
-      - 'specs/research/**'
   workflow_dispatch:
 
 permissions:
